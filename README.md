@@ -1,17 +1,13 @@
 # From aging to Alzheimer’s disease: brain DNA methylation changes in late life
 David Lukacsovich, Juan I. Young, Lissette Gomez, Michael A. Schmidt, Wei Zhang, Brian W. Kunkle, Xi Chen, Eden R. Martin, Lily Wang
 
-## Citing this repository
-
-To be added
-
 ### Description
 
-This github repository includes scripts used for the analyses in the above manuscript. 
+This GitHub repository includes scripts used for the analyses in the above manuscript. 
 
 Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular processes linking aging to AD remain unclear. We studied brain DNA methylation (DNAm) changes in normal aging versus AD in late life. Our comprehensive meta-analysis of two large cohorts of postmortem prefrontal cortex samples from subjects over 65 years old identified numerous DNAm differences consistently associated with aging in both cohorts, highlighting key genes such as ELOVL2, ISM1, and KLF14, which are implicated in various aging processes. These DNAm differences are predominantly hypermethylated, enriched in promoter regions, and associated with genes involved in immune processes and metabolic functions. Our results also revealed significant overlaps between aging-associated DNAm differences and those involved in AD, supporting the hypothesis that aging and AD are interconnected at the molecular level. Intriguingly, nearly all DNAm differences significantly associated with both age (at death) and AD Braak stage showed concordant effect sizes in the same direction. Our study provides valuable insights into the aging-associated epigenetic landscape and its potential implications for AD. As aging and AD are intertwined, targeting age-related epigenetic modifications may offer new therapeutic strategies for AD.
 
-### 1. Study cohorts, Preprocessing of DNA methylation data
+### 1. Pre-processing DNA methylation data
 
 | File                 | Dataset | Link |
 |----------------------|-------------|-------------|
@@ -20,7 +16,7 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/01b_preprocess_BDR_data.Rmd        |   BDR  | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/01b_preprocess_BDR_data.Rmd) |
 | code/markdown/01b_preprocess_Rosmap_data.Rmd         |   Rosmap  | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/01b_preprocess_Rosmap_data.Rmd) |
 
-### 2. Single cohort and Meta analysis
+### 2. Single cohort and Meta-analysis
 
 | File                 | Link |
 |----------------------|-------------|
@@ -28,7 +24,7 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/02b_association_meta_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/02b_association_meta_analysis.Rmd) |
 | code/markdown/02c_association_signif_probes.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/02c_association_signif_probes.Rmd) |
 
-### 3. Assess cometh dmr results
+### 3. DMR and enrichment analyses  
 
 | File                 | Link |
 |----------------------|-------------|
@@ -36,16 +32,16 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/03b_cometh_dmr_meta_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03b_cometh_dmr_meta_analysis.Rmd) |
 | code/markdown/03c_Annotate_combp.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03c_Annotate_combp.Rmd) |
 | code/markdown/03d_merge_cometh_dmr_combp.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03d_merge_cometh_dmr_combp.Rmd) |
-| code/markdown/03e_pathway_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03e_pathway_analysis.Rmd ) |
-| code/markdown/03f_pathway_analysis_figures.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03f_pathway_analysis_figures.Rmd) |
+| code/markdown/03e_enrichment_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03e_pathway_analysis.Rmd ) |
+| code/markdown/03f_enrichment_analysis_figures.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03f_pathway_analysis_figures.Rmd) |
 
-### 4. Correlate expression in brain and blood samples
+### 4. Correlation of Aging-associated CpGs and DMRs methylation levels in blood and brain samples  
 
 | File                 | Link |
 |----------------------|-------------|
 | code/markdown/04a_brain_blood_correlation.Rmd       |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/04a_brain_blood_correlation.Rmd) |
 
-### 5. Evaluate consistency against ad results
+### 5. Correlation between aging-associated DNAm with expressions of nearby genes 
 
 | File                 | Link |
 |----------------------|-------------|
@@ -55,9 +51,9 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/05d_get_DMR_residuals.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05d_get_DMR_residuals.Rmd) |
 | code/markdown/05e_get_RNA_residuals.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05e_get_RNA_residuals.Rmd) |
 | code/markdown/05f_associate_RNA_to_DNAm.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05f_associate_RNA_to_DNAm.Rmd) |
-| code/markdown/05g_evaluate_association_consistency.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05g_evaluate_association_consistency.Rmd) |
+| code/markdown/05g_sensitivity_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05g_evaluate_association_consistency.Rmd) |
 
-### 6. Assessment Plots
+### 6. Creating Figures
 
 | File                 | Link |
 |----------------------|-------------|
