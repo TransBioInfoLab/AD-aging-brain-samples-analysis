@@ -1,0 +1,574 @@
+---
+title: "Run coMethDMR of Rosmap and BDR DNA methylation data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(plyr)
+  library(minfi)
+  library(SummarizedExperiment)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  library(coMethDMR)
+  library(BiocParallel)
+  library(IRanges)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+bdr_dir <- file.path(dataset_dir, "BDR")
+reference_dir <- file.path(code_dir, "Reference_Files")
+
+source(file.path(code_dir, "R", "tiago_code.R"), local = TRUE)
+```
+
+# Get Residuals
+
+# Association
+
+## Define Functions
+
+```{r association_functions}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+get_lm_resid <- function(M_mat, pheno_df, fo) {
+  parallel <- TRUE
+  parallel <- start_parallel(parallel, cores = 8)
+  
+  formula <- stats::as.formula(fo)
+  
+  resid <- plyr::adply(
+    M_mat,
+    .margins = 1,
+    .fun = function(m_value) {
+      
+    data <- data.frame(m_value = m_value, pheno_df)
+    lm_mod <- stats::lm(
+      formula,
+      data = data
+    )
+    
+    residuals(lm_mod)
+    },
+    .progress = "time",
+    .parallel = parallel
+  )
+  
+  stop_parallel(parallel)
+  
+  row.names(resid) <- resid[,1]
+  resid[,1] <- NULL
+  colnames(resid) <- colnames(M_mat)
+  
+  resid
+}
+```
+
+## Rosmap
+
+```{r residual_rosmap, eval = FALSE}
+rosmap_data <- readRDS(file.path(
+  rosmap_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+
+rosmap_mat <- minfi::logit2(SummarizedExperiment::assays(rosmap_data)$DNAm)
+pheno_df <- as.data.frame(SummarizedExperiment::colData(rosmap_data)) %>%
+  dplyr::mutate(
+    age_death = as.numeric(.data$age_death),
+    sex = as.factor(.data$sex),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(.data$batch),
+    Sample_Plate = as.factor(.data$Sample_Plate)
+  )
+
+fo <-  "m_value ~ sex + NeuN_pos + batch + Sample_Plate"
+rosmap_res <- get_lm_resid(rosmap_mat, pheno_df, fo)
+
+saveRDS(rosmap_res, file = file.path(rosmap_dir, "06_cometh_data", "residuals.RDS"))
+```
+
+## BDR
+
+```{r residual_bdr, eval = FALSE}
+bdr_data <- readRDS(file.path(
+  bdr_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+
+bdr_mat <- minfi::logit2(SummarizedExperiment::assays(bdr_data)$DNAm)
+pheno_df <- as.data.frame(SummarizedExperiment::colData(bdr_data)) %>%
+  dplyr::mutate(
+    batch = substring(as.character(.data$sentrix_id), 1, 4)
+  ) %>%
+  dplyr::mutate(
+    stage = as.factor(.data$stage),
+    age_prediction = as.numeric(.data$age_prediction),
+    age_truncated = as.numeric(.data$age_truncated),
+    sex = as.factor(.data$sex),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(.data$batch)
+  )
+
+fo <-  "m_value ~ sex + NeuN_pos + batch"
+bdr_res <- get_lm_resid(bdr_mat, pheno_df, fo)
+
+saveRDS(bdr_res, file = file.path(bdr_dir, "06_cometh_data", "residuals.RDS"))
+```
+
+# Find co-methylated regions
+
+## Define Functions
+
+```{r cometh_functions}
+manage_cometh_df <- function(df) {
+  if (max(df$keep_contiguous) > 0) {
+    df <- df %>%
+      dplyr::filter(.data$keep_contiguous > 0)
+  }
+  
+  df %>%
+    dplyr::select(
+      inputRegion = "Region", "CpG", "Chr", "MAPINFO", "keep_contiguous"
+    )
+}
+
+merge_cometh_output <- function(cometh_ls) {
+  target_df <- lapply(cometh_ls, manage_cometh_df) %>%
+    dplyr::bind_rows()
+  
+  target_df
+}
+
+summarise_cometh <- function(cometh_ls) {
+  target_df <- merge_cometh_output(cometh_ls)
+  
+  region_df <- target_df %>%
+    dplyr::group_by(.data$inputRegion, .data$keep_contiguous) %>%
+    dplyr::summarise(
+      nCpGs = n(),
+      Chr = dplyr::first(.data$Chr),
+      start = min(.data$MAPINFO),
+      end = max(.data$MAPINFO)
+    ) %>%
+    dplyr::mutate(coMethRegion = paste0(.data$Chr, ":", .data$start, "-", .data$end)) %>%
+    dplyr::select(-c("Chr", "start", "end"))
+  
+  cpg_df <- target_df %>%
+    dplyr::select("inputRegion", "CpG", "keep_contiguous") %>%
+    dplyr::left_join(region_df %>% dplyr::select("inputRegion", "keep_contiguous", "coMethRegion")) %>%
+    dplyr::select("coMethRegion", Name = "CpG")
+  
+  top_df <- region_df %>%
+    dplyr::group_by(.data$inputRegion) %>%
+    dplyr::summarise(nCoMethRegion = max(.data$keep_contiguous))
+  
+  summary_df <- region_df %>%
+    dplyr::left_join(top_df) %>%
+    dplyr::select("inputRegion", "nCoMethRegion", "coMethRegion", "nCpGs")
+  
+  list(summary_df = summary_df, cpg_df = cpg_df)
+}
+
+run_cometh_analysis <- function(dataset_dir, array = c("HM450", "EPIC")) {
+  array <- match.arg(array)
+  
+  # load data
+  if (array == "HM450") {
+    ranges_ls <- readRDS(file.path(reference_dir, "HM450_Ranges.RDS"))
+    arrayType <- "450k"
+  } else {
+    ranges_ls <- readRDS(file.path(reference_dir, "EPIC_Ranges.RDS"))
+    arrayType <- "EPIC"
+  }
+  
+  residuals <- readRDS(file.path(dataset_dir, "06_cometh_data", "residuals.RDS"))
+  
+  ### Find co-methylated clusters
+  ncores <- 6
+  cometh_ls <- coMethDMR::CoMethAllRegions(
+    dnam = residuals,      
+    betaToM = FALSE,
+    method = "spearman",
+    rDropThresh_num = 0.4,
+    minCpGs = 3,
+    genome = "hg19",
+    arrayType = arrayType,
+    CpGs_ls = ranges_ls,
+    file = NULL,
+    returnAllCpGs = TRUE,
+    output = "dataframe",
+    nCores_int = ncores,
+    progressbar = FALSE
+  )
+  
+  cometh_result <- summarise_cometh(cometh_ls)
+  
+  # save results
+  saveRDS(
+    cometh_result,
+    file = file.path(dataset_dir, "06_cometh_data", "cometh_regions.RDS")
+  )
+}
+```
+
+## Calculate Residuals
+
+```{r cometh_residuals, eval = FALSE}
+run_cometh_analysis(rosmap_dir, array = "HM450")
+run_cometh_analysis(bdr_dir, array = "EPIC")
+```
+
+# Calculate Region Medians
+
+## Define Functions
+
+```{r medians_functions}
+calculate_medians <- function(exp_mat, cpg_df, summary_df) {
+  # get medians
+  probes <- row.names(exp_mat)
+  med_df <- exp_mat %>%
+    as.data.frame() %>%
+    dplyr::mutate(Name = probes) %>%
+    dplyr::left_join(cpg_df, by = "Name") %>%
+    dplyr::select(-"Name") %>%
+    dplyr::group_by(.data$coMethRegion) %>%
+    dplyr::summarise(dplyr::across(tidyselect::where(is.numeric), ~median(.x, na.rm = TRUE)))
+  
+  # reorder
+  med_df <- med_df[match(summary_df$coMethRegion, med_df$coMethRegion),]
+  
+  med_df
+}
+
+get_dataset_medians <- function(dataset_dir) {
+  # load data
+  cometh_result <- readRDS(
+    file.path(dataset_dir, "06_cometh_data", "cometh_regions.RDS")
+  )
+  summary_df <- cometh_result$summary_df
+  cpg_df <- cometh_result$cpg_df
+  
+  dnam_data <- readRDS(
+    file.path(dataset_dir, "04_qc_data", "processed_data.RDS")
+  )
+  
+  # get M-values
+  dnam_data <- dnam_data[row.names(dnam_data) %in% cpg_df$Name,]
+  exp_mat <- minfi::logit2(SummarizedExperiment::assays(dnam_data)$DNAm)
+  
+  # get medians
+  med_df <- calculate_medians(exp_mat, cpg_df, summary_df)
+  
+  # save
+  saveRDS(med_df, file = file.path(dataset_dir, "06_cometh_data", "cometh_medians.RDS"))
+}
+```
+
+## Calculate Medians
+
+```{r medians_evaluate, eval = FALSE}
+get_dataset_medians(rosmap_dir)
+get_dataset_medians(bdr_dir)
+```
+
+# Run Region Linear Regressions
+
+## Define Functions
+
+```{r regression_functions}
+add_bacon_correction <- function(data) {
+  set.seed(23)
+  bc <- bacon::bacon(
+    teststatistics = NULL,
+    effectsizes =  data$estimate,
+    standarderrors = data$std_error,
+    na.exclude = TRUE,
+    priors = list(
+      sigma = list(alpha = 1.28,  beta = 0.36), 
+      mu = list(lambda = c(0, 3, -3), tau = c(1000, 100, 100)), 
+      epsilon = list(gamma = c(99, .5, .5))
+    )
+  )
+  
+  zvalue <- data$estimate / data$std_error
+  chisq <- zvalue ^ 2
+  inflation_base <- median(chisq,na.rm = TRUE) / qchisq(0.5, 1)
+  inflation_bacon <- bacon::inflation(bc)
+  bias_bacon <- bacon::bias(bc)
+  
+  inflation_effect <- c(
+    inflation_base = as.numeric(inflation_base),
+    inflation_bacon = as.numeric(inflation_bacon),
+    bias_bacon = as.numeric(bias_bacon)
+  )
+  
+  data_bacon <- data %>%
+    dplyr::mutate(
+      estimate_bacon = bacon::es(bc),
+      std_error_bacon = bacon::se(bc),
+      pvalue_bacon = bacon::pval(bc)
+    ) %>%
+    dplyr::mutate(
+      fdr_bacon = stats::p.adjust(.data$pvalue_bacon, method = "fdr")
+    )
+
+  set.seed(42)
+  bc2 <- bacon::bacon(
+    teststatistics = NULL,
+    effectsizes = data_bacon$estimate_bacon,
+    standarderrors = data_bacon$std_error_bacon,
+    na.exclude = TRUE,
+    priors = list(
+      sigma = list(alpha = 1.28,  beta = 0.36), 
+      mu = list(lambda = c(0, 3, -3), tau = c(1000, 100, 100)), 
+      epsilon = list(gamma = c(99, .5, .5))
+    )
+  )
+  
+  zvalue <- data_bacon$estimate_bacon / data_bacon$std_error_bacon
+  chisq <- zvalue ^ 2
+  inflation_correction <- median(chisq,na.rm = TRUE)/qchisq(0.5, 1)
+  inflation_bacon_correction <- bacon::inflation(bc2)
+  bias_bacon_correction <- bacon::bias(bc2)
+  
+  inflation_effect <- c(
+    inflation_original = as.numeric(inflation_base),
+    inflation_bacon = as.numeric(inflation_bacon),
+    bias_bacon = as.numeric(bias_bacon),
+    infaction_correction = as.numeric(inflation_correction),
+    inflation_bacon_correction = as.numeric(inflation_bacon_correction),
+    bias_bacon_correction = as.numeric(bias_bacon_correction)
+  )
+  
+  list(data = data_bacon, inflation_effect = inflation_effect)
+}
+
+run_cometh_regression <- function(
+    predictors_char, covariates_char, pheno_df, med_df, summary_df
+) {
+  med_df <- med_df %>%
+    dplyr::select(-"coMethRegion")
+  
+  res_df <- TestAllRegions_noInfo(
+    predictors_char = predictors_char,
+    covariates_char = covariates_char,
+    pheno_df = pheno_df,
+    summarizedRegions_df = med_df,
+    cores = 8
+  ) %>%
+    dplyr::rename(
+      estimate = "Estimate",
+      std_error = "StdErr",
+      pvalue = "pValue",
+      fdr = "FDR"
+    )
+  
+  bacon_res <- add_bacon_correction(res_df)
+  result_df <- cbind(summary_df, bacon_res$data)
+  inflation <- bacon_res$inflation_effect
+  
+  list(result_df = result_df, inflation = inflation)
+}
+```
+
+## Rosmap
+
+```{r regression_rosmap, eval = FALSE}
+# load data
+rosmap_med_df <- readRDS(file.path(rosmap_dir, "06_cometh_data", "cometh_medians.RDS"))
+rosmap_cometh_result <- readRDS(
+  file.path(rosmap_dir, "06_cometh_data", "cometh_regions.RDS")
+)
+rosmap_summary_df <- rosmap_cometh_result$summary_df
+
+rosmap_data <- readRDS(file.path(
+  rosmap_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+rosmap_pheno <- SummarizedExperiment::colData(rosmap_data) %>%
+  as.data.frame()
+
+# adjust variable types
+rosmap_pheno <- rosmap_pheno %>%
+  dplyr::mutate(
+    age_death = as.numeric(.data$age_death),
+    sex = as.factor(as.character(.data$sex)),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(as.character(.data$batch)),
+    Sample_Plate = as.factor(as.character(.data$Sample_Plate))
+  )
+
+predictors_char <- "age_death"
+covariates_char <- c("sex", "NeuN_pos", "batch", "Sample_Plate")
+
+rosmap_res <- run_cometh_regression(
+  predictors_char,
+  covariates_char,
+  rosmap_pheno,
+  rosmap_med_df,
+  rosmap_summary_df
+)
+
+rosmap_result_df <- rosmap_res$result_df
+rosmap_inflation <- rosmap_res$inflation
+
+# save
+saveRDS(rosmap_result_df, file = file.path(rosmap_dir, "06_cometh_data", "cometh_results.RDS"))
+saveRDS(rosmap_inflation, file = file.path(rosmap_dir, "06_cometh_data", "cometh_inflation.RDS"))
+```
+
+## BDR
+
+```{r regression_bdr, eval = FALSE}
+# load data
+bdr_med_df <- readRDS(file.path(bdr_dir, "06_cometh_data", "cometh_medians.RDS"))
+bdr_cometh_result <- readRDS(
+  file.path(bdr_dir, "06_cometh_data", "cometh_regions.RDS")
+)
+bdr_summary_df <- bdr_cometh_result$summary_df
+
+bdr_data <- readRDS(file.path(
+  bdr_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+bdr_pheno <- SummarizedExperiment::colData(bdr_data) %>%
+  as.data.frame()
+
+# adjust variable types
+bdr_pheno <- bdr_pheno %>%
+  dplyr::mutate(
+    batch = substring(as.character(.data$sentrix_id), 1, 4)
+  ) %>%
+  dplyr::mutate(
+    Sample = .data$sample
+  ) %>%
+  dplyr::mutate(
+    age_truncated = as.numeric(.data$age_truncated),
+    sex = as.factor(as.character(.data$sex)),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(as.character(.data$batch))
+  )
+
+predictors_char <- "age_truncated"
+covariates_char <- c("sex", "NeuN_pos", "batch")
+
+bdr_res <- run_cometh_regression(
+  predictors_char,
+  covariates_char,
+  bdr_pheno,
+  bdr_med_df,
+  bdr_summary_df
+)
+
+bdr_result_df <- bdr_res$result_df
+bdr_inflation <- bdr_res$inflation
+
+# save
+saveRDS(bdr_result_df, file = file.path(bdr_dir, "06_cometh_data", "cometh_results.RDS"))
+saveRDS(bdr_inflation, file = file.path(bdr_dir, "06_cometh_data", "cometh_inflation.RDS"))
+```
+
+## Show Inflation Effect
+
+```{r regression_inflation}
+rosmap_inflation <- readRDS(file.path(rosmap_dir, "06_cometh_data", "cometh_inflation.RDS"))
+bdr_inflation <- readRDS(file.path(bdr_dir, "06_cometh_data", "cometh_inflation.RDS"))
+
+inflation_df <- data.frame(
+  score = c(
+    "inflation_original", "inflation_bacon", "bias_bacon",
+    "inflation_correction", "inflation_bacon_correction", "bias_bacon_correction"
+  ),
+  rosmap = round(as.numeric(rosmap_inflation), digits = 5),
+  bdr = round(as.numeric(bdr_inflation), digits = 5)
+)
+
+inflation_df %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Inflation Correction Effect"
+  )
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

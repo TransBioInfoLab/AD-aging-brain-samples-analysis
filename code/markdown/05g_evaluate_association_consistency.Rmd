@@ -1,0 +1,792 @@
+---
+title: "Evaluate if the associations in normal, AD, and all samples are the same or not"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+reference_dir <- file.path(code_dir, "Reference_Files")
+rna_dir <- file.path(base_dir, "coMethDMR_metaAnalysis/DNAm_RNA/data")
+```
+
+## Load Results
+
+```{r load}
+dnam_df <- read.csv(file.path(
+  result_dir, "DNAm_RNA", "All_CpG_to_RNA_Association.csv")
+) %>%
+  dplyr::select(
+    "CpG",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr",
+    count_all = "count_total",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral"))
+dnam_norm_df <- read.csv(file.path(
+  result_dir, "DNAm_RNA", "Normal_CpG_to_RNA_Association.csv")
+) %>%
+  dplyr::select(
+    "CpG",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral"))
+dnam_ad_df <- read.csv(file.path(
+  result_dir, "DNAm_RNA", "AD_CpG_to_RNA_Association.csv")
+) %>%
+  dplyr::select(
+    "CpG",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral"))
+```
+
+# Volcano Plots
+
+Volcano plots can be used to plot significance vs estimate, to see if a stronger correlation corresponds to more significance. It is a good initial check to make sure that a distribution makes sense
+
+## Define Function
+
+```{r volcano_function}
+create_volcano <- function(dnam_df, title) {
+  thresh <- dnam_df %>%
+    dplyr::arrange(dplyr::desc(.data$plog)) %>%
+    head(n = 5) %>%
+    dplyr::pull("plog") %>%
+    min()
+  
+  plot_df <- dnam_df %>%
+    dplyr::mutate(
+      label = ifelse(.data$plog >= thresh, paste0(.data$CpG, "_", .data$gene), "")
+    )
+  
+  ggplot2::ggplot(
+    plot_df,
+    mapping = ggplot2::aes(x = estimate, y = plog, color = sig, label = label)
+  ) +
+    ggplot2::geom_point(size = 1) +
+    ggplot2::xlab("Correlation Estimate") +
+    ggplot2::ylab("-log10(p-value)") +
+    ggplot2::ggtitle(title) +
+    ggrepel::geom_text_repel()
+}
+```
+
+
+## Plot Normal Data
+
+```{r volcano_normal}
+create_volcano(dnam_norm_df, "Normal Samples")
+```
+
+## Plot AD Data
+
+```{r volcano_ad}
+create_volcano(dnam_ad_df, "AD Samples")
+```
+
+## Plot All Data
+
+```{r volcano_all}
+create_volcano(dnam_df, "All Samples")
+```
+
+Overall, the plots show the expected distributions - with a few artifacts to the side - and the top 5 most significant correlations appear to be consistent between AD and all samples.
+
+# Correlation Plots
+
+Next we plot the estimates and log of p-values across different methods against each other, to see how close to a linear fit that we get.
+
+## Define Functions
+
+```{r compare_functions}
+estimates_plot <- function(df_1, df_2, xlabel, ylabel) {
+  df_1 <- df_1 %>%
+    dplyr::select("CpG", "ens", "gene", estimate_x = "estimate", sig_x = "sig")
+  df_2 <- df_2 %>%
+    dplyr::select("CpG", "ens", "gene", estimate_y = "estimate", sig_y = "sig")
+  
+  plot_df <- df_1 %>%
+    dplyr::full_join(df_2, by = c("CpG", "ens", "gene")) %>%
+    dplyr::mutate(label = paste0(.data$CpG, "_", .data$gene), to_label = FALSE) %>%
+    dplyr::mutate(
+      signif = paste0(.data$sig_x, "_", .data$sig_y)
+    ) %>%
+    dplyr::mutate(
+      signif = ifelse(.data$signif == "neutral_neutral", "neither", .data$signif),
+      signif = ifelse(.data$signif == "neutral_signif", ylabel, .data$signif),
+      signif = ifelse(.data$signif == "signif_neutral", xlabel, .data$signif),
+      signif = ifelse(.data$signif == "signif_signif", "both", .data$signif)
+    ) %>%
+    dplyr::mutate(
+      size = ifelse(.data$signif == "neither", 0.1, 1)
+    )
+  
+  plot_df <- rbind(
+    plot_df %>%
+      dplyr::filter(.data$signif == "neither"),
+    plot_df %>%
+      dplyr::filter(.data$signif != "neither")
+  )
+  
+  ggplot2::ggplot(plot_df, mapping = ggplot2::aes(x = estimate_x, y = estimate_y, color = signif)) +
+    ggplot2::geom_point(size = 1) +
+    ggplot2::xlab(paste0(xlabel, " Samples, Correlation Estimate")) +
+    ggplot2::ylab(paste0(ylabel, " Samples, Correlation Estimate")) +
+    ggplot2::ggtitle("Compare Estimates")
+}
+
+plog_plot <- function(df_1, df_2, xlabel, ylabel) {
+  df_1 <- df_1 %>%
+    dplyr::mutate(
+      plog = sign(.data$estimate) * .data$plog
+    ) %>%
+    dplyr::select("CpG", "ens", "gene", plog_x = "plog", sig_x = "sig")
+  df_2 <- df_2 %>%
+    dplyr::mutate(
+      plog = sign(.data$estimate) * .data$plog
+    ) %>%
+    dplyr::select("CpG", "ens", "gene", plog_y = "plog", sig_y = "sig")
+  
+  plot_df <- df_1 %>%
+    dplyr::full_join(df_2, by = c("CpG", "ens", "gene")) %>%
+    dplyr::mutate(label = paste0(.data$CpG, "_", .data$gene), to_label = FALSE) %>%
+    dplyr::mutate(
+      signif = paste0(.data$sig_x, "_", .data$sig_y)
+    ) %>%
+    dplyr::mutate(
+      signif = ifelse(.data$signif == "neutral_neutral", "neither", .data$signif),
+      signif = ifelse(.data$signif == "neutral_signif", ylabel, .data$signif),
+      signif = ifelse(.data$signif == "signif_neutral", xlabel, .data$signif),
+      signif = ifelse(.data$signif == "signif_signif", "both", .data$signif)
+    ) %>%
+    dplyr::mutate(
+      size = ifelse(.data$signif == "neither", 0.1, 1)
+    )
+  
+  plot_df <- rbind(
+    plot_df %>%
+      dplyr::filter(.data$signif == "neither"),
+    plot_df %>%
+      dplyr::filter(.data$signif != "neither")
+  )
+  
+  ggplot2::ggplot(plot_df, mapping = ggplot2::aes(x = plog_x, y = plog_y, color = signif)) +
+    ggplot2::geom_point(size = 1) +
+    ggplot2::xlab(paste0(xlabel, " Samples, Correlation -log10(p-value)")) +
+    ggplot2::ylab(paste0(ylabel, " Samples, Correlation -log10(p-value)")) +
+    ggplot2::ggtitle("Compare Significance")
+}
+```
+
+## Compare Estimates
+
+### Normal vs AD
+
+```{r estimate_norm_ad}
+estimates_plot(dnam_norm_df, dnam_ad_df, "Normal", "AD")
+```
+
+### Normal vs All
+
+```{r estimate_norm_all}
+estimates_plot(dnam_norm_df, dnam_df, "Normal", "All")
+```
+
+### AD vs All
+
+```{r estimate_ad_all}
+estimates_plot(dnam_ad_df, dnam_df, "AD", "All")
+```
+
+## Compare Significance
+
+Compare log10 of p-values, adjusted by signs of estimates
+
+### Normal vs AD
+
+```{r signif_norm_ad}
+plog_plot(dnam_norm_df, dnam_ad_df, "Normal", "AD")
+```
+
+### Normal vs All
+
+```{r signif_norm_all}
+plog_plot(dnam_norm_df, dnam_df, "Normal", "All")
+```
+
+### AD vs All
+
+```{r signif_ad_all}
+plog_plot(dnam_ad_df, dnam_df, "AD", "All")
+```
+
+# Calculate Correlation Scores
+
+While plots help with visualization, it is useful to have concrete correlation scores to look at as well.
+
+## Define Functions
+
+```{r corr_functions}
+compare_estimates <- function(df_1, df_2, filter_sig = FALSE) {
+  est_df <- df_1 %>%
+    dplyr::select("CpG", "ens", estimate_x = "estimate", sig_x = "sig") %>%
+    dplyr::full_join(
+      df_2 %>%
+        dplyr::select("CpG", "ens", estimate_y = "estimate", sig_y = "sig")
+    )
+  
+  if (filter_sig) {
+    est_df <- est_df %>%
+      dplyr::filter(.data$sig_x == "signif" | .data$sig_y == "signif")
+  }
+  
+  corr.1 <- cor.test(est_df$estimate_x, est_df$estimate_y, method = "spearman")
+  corr.2 <- cor.test(est_df$estimate_x, est_df$estimate_y, method = "pearson")
+  
+  list(corr.spear = corr.1, corr.pear = corr.2, count = nrow(est_df))
+}
+
+get_estimate_scores <- function(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = FALSE) {
+  norm_ad <- compare_estimates(dnam_norm_df, dnam_ad_df, filter_sig = filter_sig)
+  corr.1 <- norm_ad$corr.spear
+  corr.2 <- norm_ad$corr.pear
+  
+  norm_all <- compare_estimates(dnam_norm_df, dnam_df, filter_sig = filter_sig)
+  corr.3 <- norm_all$corr.spear
+  corr.4 <- norm_all$corr.pear
+  
+  all_ad <- compare_estimates(dnam_df, dnam_ad_df, filter_sig = filter_sig)
+  corr.5 <- all_ad$corr.spear
+  corr.6 <- all_ad$corr.pear
+  
+  data.frame(
+    comparison = c(
+      "Normal vs AD",
+      "Normal vs AD",
+      "Normal vs All",
+      "Normal vs All",
+      "AD vs All",
+      "AD vs All"
+    ),
+    test = c(
+      "Spearman",
+      "Pearson",
+      "Spearman",
+      "Pearson",
+      "Spearman",
+      "Pearson"
+    ),
+    estimate = c(
+      corr.1$estimate,
+      corr.2$estimate,
+      corr.3$estimate,
+      corr.4$estimate,
+      corr.5$estimate,
+      corr.6$estimate
+    ),
+    pvalue = c(
+      corr.1$p.value,
+      corr.2$p.value,
+      corr.3$p.value,
+      corr.4$p.value,
+      corr.5$p.value,
+      corr.6$p.value
+    ),
+    n = c(
+      norm_ad$count,
+      norm_ad$count,
+      norm_all$count,
+      norm_all$count,
+      all_ad$count,
+      all_ad$count
+    )
+  )
+}
+
+get_plog_scores <- function(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = FALSE) {
+  get_estimate_scores(
+    dnam_df %>% dplyr::mutate(estimate = sign(.data$estimate) * .data$plog),
+    dnam_norm_df %>% dplyr::mutate(estimate = sign(.data$estimate) * .data$plog),
+    dnam_ad_df %>% dplyr::mutate(estimate = sign(.data$estimate) * .data$plog),
+    filter_sig = filter_sig
+  )
+}
+```
+
+## Get Correlation Scores
+
+```{r corr_eval}
+est_df <- get_estimate_scores(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = FALSE)
+plog_df <- get_plog_scores(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = FALSE)
+
+est_sig_df <- get_estimate_scores(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = TRUE)
+plog_sig_df <- get_plog_scores(dnam_df, dnam_norm_df, dnam_ad_df, filter_sig = TRUE)
+```
+
+## Display Correlation of DNAm to RNA associations
+
+### Estimate Correlations
+
+```{r corr_disp_est}
+est_df
+```
+
+### Significance Correlations
+
+```{r corr_disp_plog}
+plog_df
+```
+
+## Display Correlation of Significant DNAm to RNA associations
+
+### Estimate Correlations
+
+```{r corr_disp_sig_est}
+est_sig_df
+```
+
+### Significance Correlations
+
+```{r corr_disp_sig_plog}
+plog_sig_df
+```
+
+# Tabulate Directions
+
+We want to see how many comparisons - both significant and not - shared directions in different sample groups
+
+## Define Functions
+
+```{r tabular_functions}
+get_tables <- function(df_1, df_2) {
+  comp_df <- df_1 %>%
+    dplyr::mutate(direction = ifelse(.data$estimate > 0, "+", "-")) %>%
+    dplyr::select("CpG", "ens", sign_x = "direction", sig_x = "sig") %>%
+    dplyr::full_join(
+      df_2 %>%
+        dplyr::mutate(direction = ifelse(.data$estimate > 0, "+", "-")) %>%
+        dplyr::select("CpG", "ens", sign_y = "direction", sig_y = "sig")
+    ) %>%
+    dplyr::mutate(sig = ((.data$sig_x == "signif") | (.data$sig_y == "signif")))
+  
+  list(
+    all = comp_df %>%
+      dplyr::select("sign_x", "sign_y") %>%
+      table(),
+    base = comp_df %>%
+      dplyr::filter(!.data$sig) %>%
+      dplyr::select("sign_x", "sign_y") %>%
+      table(),
+    signif = comp_df %>%
+      dplyr::filter(.data$sig) %>%
+      dplyr::select("sign_x", "sign_y") %>%
+      table()
+  )
+}
+```
+
+
+## Normal vs AD
+
+```{r tabular_norm_ad}
+res <- get_tables(dnam_norm_df, dnam_ad_df)
+
+print("All Comparisons (x = Normal, y = AD)")
+res$all
+print("Non-Signif Comparisons (x = Normal, y = AD)")
+res$base
+print("Signif Comparisons (x = Normal, y = AD)")
+res$signif
+```
+
+## Normal vs All
+
+```{r tabular_norm_all}
+res <- get_tables(dnam_norm_df, dnam_df)
+
+print("All Comparisons (x = Normal, y = All Samples)")
+res$all
+print("Non-Signif Comparisons (x = Normal, y = All Samples)")
+res$base
+print("Signif Comparisons (x = Normal, y = All Samples)")
+res$signif
+```
+
+## AD vs All
+
+```{r tabular_ad_all}
+res <- get_tables(dnam_ad_df, dnam_df)
+
+print("All Comparisons (x = AD, y = All Samples)")
+res$all
+print("Non-Signif Comparisons (x = AD, y = All Samples)")
+res$base
+print("Signif Comparisons (x = AD, y = All Samples)")
+res$signif
+```
+
+# Save Signifs
+
+Make a file containing only CpG-gene comparisons that are significant in at least 1 method
+
+```{r}
+group_df <- dnam_df %>%
+  dplyr::select(
+    "CpG",
+    "ens",
+    "gene",
+    estimate_all = "estimate",
+    pvalue_all = "pvalue",
+    fdr_all = "fdr",
+    "count_all",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::full_join(
+    dnam_norm_df %>%
+      dplyr::select(
+        "CpG",
+        "ens",
+        "gene",
+        estimate_norm = "estimate",
+        pvalue_norm = "pvalue",
+        fdr_norm = "fdr"
+      ),
+    by = c("CpG", "ens", "gene")
+  ) %>%
+  dplyr::full_join(
+    dnam_ad_df %>%
+      dplyr::select(
+        "CpG",
+        "ens",
+        "gene",
+        estimate_ad = "estimate",
+        pvalue_ad = "pvalue",
+        fdr_ad = "fdr"
+      ),
+    by = c("CpG", "ens", "gene")
+  ) %>%
+  dplyr::select(
+    "CpG",
+    "ens",
+    "gene",
+    "estimate_all",
+    "estimate_norm",
+    "estimate_ad",
+    "pvalue_all",
+    "pvalue_norm",
+    "pvalue_ad",
+    "fdr_all",
+    "fdr_norm",
+    "fdr_ad",
+    "count_all",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::filter(
+    (.data$fdr_all <= 0.05) |
+      (.data$fdr_norm <= 0.05) |
+      (.data$fdr_ad <= 0.05)
+  )
+
+write.csv(group_df, file = file.path(
+  result_dir, "DNAm_RNA", "CpG_to_RNA_Significant_Comparisons.csv"
+))
+```
+
+# Evaluate DMR Signifs
+
+We want to look at and evaluate DMR signifs as well
+
+## Load DMR Results
+
+```{r load_dmr}
+dmr_df <- read.csv(file.path(
+  result_dir, "DNAm_RNA", "All_DMR_to_RNA_Association.csv"
+)) %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr",
+    count_all = "count_total",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral")) %>%
+  dplyr::mutate(CpG = .data$combp_DMR)
+
+dmr_norm_df <- read.csv(
+  file.path(
+    result_dir, "dnam_RNA", "Normal_DMR_to_RNA_Association.csv"
+  )
+) %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral")) %>%
+  dplyr::mutate(CpG = .data$combp_DMR)
+
+dmr_ad_df <- read.csv(
+  file.path(
+    result_dir, "dnam_RNA", "AD_DMR_to_RNA_Association.csv"
+  )
+) %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "ens",
+    "gene",
+    "estimate",
+    "pvalue",
+    "fdr"
+  ) %>%
+  dplyr::mutate(plog = -log10(.data$pvalue)) %>%
+  dplyr::mutate(sig = ifelse(.data$fdr < 0.05, "signif", "neutral")) %>%
+  dplyr::mutate(CpG = .data$combp_DMR)
+```
+
+## Get Correlation Scores
+
+```{r corr_eval_dmr}
+est_df <- get_estimate_scores(dmr_df, dmr_norm_df, dmr_ad_df, filter_sig = FALSE)
+plog_df <- get_plog_scores(dmr_df, dmr_norm_df, dmr_ad_df, filter_sig = FALSE)
+
+est_sig_df <- get_estimate_scores(dmr_df, dmr_norm_df, dmr_ad_df, filter_sig = TRUE)
+plog_sig_df <- get_plog_scores(dmr_df, dmr_norm_df, dmr_ad_df, filter_sig = TRUE)
+```
+
+### Display Correlation of DMR to RNA associations
+
+#### Estimate Correlations
+
+```{r corr_disp_est_dmr}
+est_df
+```
+
+#### Significance Correlations
+
+```{r corr_disp_plog_dmr}
+plog_df
+```
+
+### Display Correlation of Significant DMR to RNA associations
+
+#### Estimate Correlations
+
+```{r corr_disp_sig_est_dmr}
+est_sig_df
+```
+
+#### Significance Correlations
+
+```{r corr_disp_sig_plog_dmr}
+plog_sig_df
+```
+
+## Merge and Filter DMR Filters
+
+```{r merge_dmr}
+group_df <- dmr_df %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "ens",
+    "gene",
+    estimate_all = "estimate",
+    pvalue_all = "pvalue",
+    fdr_all = "fdr",
+    "count_all",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::full_join(
+    dmr_norm_df %>%
+      dplyr::select(
+        "DMR",
+        "combp_DMR",
+        "ens",
+        "gene",
+        estimate_norm = "estimate",
+        pvalue_norm = "pvalue",
+        fdr_norm = "fdr"
+      ),
+    by = c("DMR", "combp_DMR", "ens", "gene")
+  ) %>%
+  dplyr::full_join(
+    dmr_ad_df %>%
+      dplyr::select(
+        "DMR",
+        "combp_DMR",
+        "ens",
+        "gene",
+        estimate_ad = "estimate",
+        pvalue_ad = "pvalue",
+        fdr_ad = "fdr"
+      ),
+    by = c("DMR", "combp_DMR", "ens", "gene")
+  ) %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "ens",
+    "gene",
+    "estimate_all",
+    "estimate_norm",
+    "estimate_ad",
+    "pvalue_all",
+    "pvalue_norm",
+    "pvalue_ad",
+    "fdr_all",
+    "fdr_norm",
+    "fdr_ad",
+    "count_all",
+    "count_norm",
+    "count_ad"
+  ) %>%
+  dplyr::filter(
+    (.data$fdr_all <= 0.05) |
+      (.data$fdr_norm <= 0.05) |
+      (.data$fdr_ad <= 0.05)
+  )
+```
+
+## Save DMR Results
+
+```{r save_dmr}
+write.csv(group_df, file = file.path(
+  result_dir, "DNAm_RNA", "DMR_to_RNA_Significant_Comparisons.csv")
+)
+```
+
+# Evaluate Merged Correlation
+
+## Merge Data Points
+
+```{r merge_dmr_dnam}
+all_df <- rbind(
+  dnam_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig"),
+  dmr_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig")
+)
+
+norm_df <- rbind(
+  dnam_norm_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig"),
+  dmr_norm_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig")
+)
+
+ad_df <- rbind(
+  dnam_ad_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig"),
+  dmr_ad_df %>% dplyr::select("CpG", "ens", "estimate", "plog", "sig")
+)
+```
+
+## Calculate Scores
+
+```{r merge_scores}
+est_df <- get_estimate_scores(all_df, norm_df, ad_df, filter_sig = FALSE)
+plog_df <- get_plog_scores(all_df, norm_df, ad_df, filter_sig = FALSE)
+
+est_sig_df <- get_estimate_scores(all_df, norm_df, ad_df, filter_sig = TRUE)
+plog_sig_df <- get_plog_scores(all_df, norm_df, ad_df, filter_sig = TRUE)
+```
+
+## Show Correlation Tabels
+
+### Display Correlation of DMR to RNA associations
+
+#### Estimate Correlations
+
+```{r corr_disp_est_merge}
+est_df
+```
+
+#### Significance Correlations
+
+```{r corr_disp_plog_merge}
+plog_df
+```
+
+### Display Correlation of Significant DMR to RNA associations
+
+#### Estimate Correlations
+
+```{r corr_disp_sig_est_merge}
+est_sig_df
+```
+
+#### Significance Correlations
+
+```{r corr_disp_sig_plog_merge}
+plog_sig_df
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+

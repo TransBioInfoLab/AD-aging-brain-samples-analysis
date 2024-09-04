@@ -1,0 +1,321 @@
+---
+title: "Run association of Rosmap and BDR DNA methylation data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(plyr)
+  library(minfi)
+  library(SummarizedExperiment)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  library(stats)
+  library(bacon)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+bdr_dir <- file.path(dataset_dir, "BDR")
+```
+
+## Read in Data
+
+```{r get_data}
+rosmap_data <- readRDS(file.path(
+  rosmap_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+
+bdr_data <- readRDS(file.path(
+  bdr_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+```
+
+# Association
+
+## Define Functions
+
+```{r association_functions}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+run_lm_test <- function(M_mat, pheno_df, fo, test_var) {
+  parallel <- TRUE
+  parallel <- start_parallel(parallel, cores = 8)
+  
+  formula <- stats::as.formula(fo)
+  
+  results <- plyr::adply(
+    M_mat,
+    .margins = 1,
+    .fun = function(m_value){
+  
+      # m_value <- scale(m_value)
+      data <- data.frame(m_value = m_value, pheno_df)
+      lm_mod <- stats::lm(
+        formula,
+        data = data
+      )
+      
+      lm_coef <- data.frame(summary(lm_mod)$coefficients)
+      coef_df <- lm_coef[grepl(test_var, rownames(lm_coef)),]
+      janitor::clean_names(coef_df)
+    }, .parallel = parallel
+  )
+  
+  stop_parallel(parallel)
+  
+  results <- results %>%
+    dplyr::rename(
+      probe = "X1",
+      pvalue = "pr_t"
+    ) %>%
+    dplyr::mutate(
+      fdr = stats::p.adjust(.data$pvalue, method = "fdr")
+      )
+  
+  results
+}
+
+add_bacon_correction <- function(data) {
+  set.seed(23)
+  bc <- bacon::bacon(
+    teststatistics = NULL,
+    effectsizes =  data$estimate,
+    standarderrors = data$std_error,
+    na.exclude = TRUE,
+    priors = list(
+      sigma = list(alpha = 1.28,  beta = 0.36), 
+      mu = list(lambda = c(0, 3, -3), tau = c(1000, 100, 100)), 
+      epsilon = list(gamma = c(99, .5, .5))
+    )
+  )
+  
+  zvalue <- data$estimate / data$std_error
+  chisq <- zvalue ^ 2
+  inflation_base <- median(chisq,na.rm = TRUE) / qchisq(0.5, 1)
+  inflation_bacon <- bacon::inflation(bc)
+  bias_bacon <- bacon::bias(bc)
+  
+  inflation_effect <- c(
+    inflation_base = as.numeric(inflation_base),
+    inflation_bacon = as.numeric(inflation_bacon),
+    bias_bacon = as.numeric(bias_bacon)
+  )
+  
+  data_bacon <- data %>%
+    dplyr::mutate(
+      estimate_bacon = bacon::es(bc),
+      std_error_bacon = bacon::se(bc),
+      pvalue_bacon = bacon::pval(bc)
+    ) %>%
+    dplyr::mutate(
+      fdr_bacon = stats::p.adjust(.data$pvalue_bacon, method = "fdr")
+    )
+
+  set.seed(42)
+  bc2 <- bacon::bacon(
+    teststatistics = NULL,
+    effectsizes = data_bacon$estimate_bacon,
+    standarderrors = data_bacon$std_error_bacon,
+    na.exclude = TRUE,
+    priors = list(
+      sigma = list(alpha = 1.28,  beta = 0.36), 
+      mu = list(lambda = c(0, 3, -3), tau = c(1000, 100, 100)), 
+      epsilon = list(gamma = c(99, .5, .5))
+    )
+  )
+  
+  zvalue <- data_bacon$estimate_bacon / data_bacon$std_error_bacon
+  chisq <- zvalue ^ 2
+  inflation_correction <- median(chisq,na.rm = TRUE)/qchisq(0.5, 1)
+  inflation_bacon_correction <- bacon::inflation(bc2)
+  bias_bacon_correction <- bacon::bias(bc2)
+  
+  inflation_effect <- c(
+    inflation_original = as.numeric(inflation_base),
+    inflation_bacon = as.numeric(inflation_bacon),
+    bias_bacon = as.numeric(bias_bacon),
+    infaction_correction = as.numeric(inflation_correction),
+    inflation_bacon_correction = as.numeric(inflation_bacon_correction),
+    bias_bacon_correction = as.numeric(bias_bacon_correction)
+  )
+  
+  list(data = data_bacon, inflation_effect = inflation_effect)
+}
+```
+
+## Run Association Test
+
+### Rosmap
+
+```{r association_rosmap}
+M_mat <- minfi::logit2(SummarizedExperiment::assays(rosmap_data)$DNAm)
+pheno_df <- as.data.frame(SummarizedExperiment::colData(rosmap_data)) %>%
+  dplyr::mutate(
+    age_death = as.numeric(.data$age_death),
+    sex = as.factor(.data$sex),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(.data$batch),
+    Sample_Plate = as.factor(.data$Sample_Plate)
+  )
+
+fo <-  "m_value ~ age_death + sex + NeuN_pos + batch + Sample_Plate"
+rosmap_res <- run_lm_test(M_mat, pheno_df, fo, "age_death")
+```
+
+### BDR
+
+```{r association_bdr}
+M_mat <- minfi::logit2(SummarizedExperiment::assays(bdr_data)$DNAm)
+pheno_df <- as.data.frame(SummarizedExperiment::colData(bdr_data)) %>%
+  dplyr::mutate(
+    batch = substring(as.character(.data$sentrix_id), 1, 4)
+  ) %>%
+  dplyr::mutate(
+    stage = as.factor(.data$stage),
+    age_prediction = as.numeric(.data$age_prediction),
+    age_truncated = as.numeric(.data$age_truncated),
+    sex = as.factor(.data$sex),
+    NeuN_pos = as.numeric(.data$NeuN_pos),
+    batch = as.factor(.data$batch)
+    # slide = as.factor(slide)
+    # sentrix_id = as.factor(sentrix_id)
+  )
+
+fo <-  "m_value ~ age_truncated + sex + NeuN_pos + batch"
+bdr_res <- run_lm_test(M_mat, pheno_df, fo, "age_truncated")
+```
+
+## Run Bacon Correction
+
+### Rosmap
+
+```{r bacon_rosmap}
+rosmap_bacon <- add_bacon_correction(rosmap_res)
+rosmap_res <- rosmap_bacon$data
+rosmap_inflation <- rosmap_bacon$inflation_effect
+```
+
+### BDR
+
+```{r bacon_bdr}
+bdr_bacon <- add_bacon_correction(bdr_res)
+bdr_res <- bdr_bacon$data
+bdr_inflation <- bdr_bacon$inflation_effect
+```
+
+# Summarize
+
+## Quantify Inflation Correction
+
+```{r inlation_display}
+inflation_df <- data.frame(
+  score = c(
+    "inflation_original", "inflation_bacon", "bias_bacon",
+    "inflation_correction", "inflation_bacon_correction", "bias_bacon_correction"
+  ),
+  bdr = round(as.numeric(bdr_inflation), digits = 5),
+  rosmap = round(as.numeric(rosmap_inflation), digits = 5)
+)
+
+inflation_df %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Inflation Correction Effect"
+  )
+```
+
+## Save Results
+
+```{r save}
+write.csv(
+  rosmap_res,
+  file = file.path(rosmap_dir, "05_association_data", "age_association.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  bdr_res,
+  file = file.path(bdr_dir, "05_association_data", "age_association.csv"),
+  row.names = FALSE
+)
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

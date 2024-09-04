@@ -1,0 +1,330 @@
+---
+title: "Read in DNA methylation data, and pre-filter to normal, prefrontal data"
+subtitle: "Read and pre-filter ROSMAP data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  
+  library(GEOquery)
+  library(Biobase)
+  library(stringr)
+  library(plyr)
+  library(downloader)
+  library(stats)
+  library(ggplot2)
+  
+  source("../R/CorticalClock.r", local=TRUE)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+dataset_dir <- file.path(code_dir, "DATASETS", "Rosmap")
+download_dir <- file.path(dataset_dir, "01_download")
+idat_dir <- file.path(dataset_dir, "02_idat_data")
+compile_dir <- file.path(dataset_dir, "03_sample_data")
+reference_dir <- file.path(code_dir, "Reference_Files")
+```
+
+# Get Phenotype Data
+
+## Read Phenotype Files
+
+```{r read_pheno_files}
+# read phenotype files
+df_1 <- read.csv(file.path(
+  reference_dir, "ROSMAP_clinical_4-8-2024.csv"
+)) %>%
+  dplyr::select(
+    "projid",
+    "Study",
+    "msex",
+    "educ",
+    "race",
+    "spanish",
+    "apoe_genotype",
+    "age_at_visit_max",
+    "age_first_ad_dx",
+    "age_death",
+    "cts_mmse30_first_ad_dx",
+    "cts_mmse30_lv",
+    "pmi",
+    "braaksc",
+    "ceradsc",
+    "cogdx"
+  ) %>%
+  dplyr::distinct()
+df_2 <- read.table(file.path(
+  reference_dir, "ROSMAP_arrayMethylation_covariates.tsv"
+), header = TRUE) %>%
+  dplyr::select(
+    "Sample",
+    "Sentrix_ID",
+    "Sentrix_Position",
+    "Sample_Plate",
+    "Sample_Well",
+    "Sample_Group",
+    "batch"
+  ) %>%
+  dplyr::distinct()
+df_3 <- read.csv(file.path(
+  reference_dir, "ROSMAP_IDkey.csv"
+)) %>%
+  dplyr::select(Sample = "mwas_id", "projid") %>%
+  dplyr::distinct()
+```
+
+## Get List of Existing idat Files
+
+```{r get_idat_list}
+df_idat <- list.files(
+  idat_dir,
+  pattern = "*_Grn.idat",
+  all.files = FALSE,
+  full.names = FALSE,
+  recursive = TRUE
+) %>%
+  stringr::str_split_fixed(pattern = "_", n=3) %>%
+  data.frame() %>%
+  dplyr::select(sentrix_id = "X1", slide = "X2") %>%
+  dplyr::mutate(sentrix_id = gsub("^.*/", "", .data$sentrix_id)) %>%
+  dplyr::mutate(label = paste0(.data$sentrix_id, "_", .data$slide))
+```
+
+## Merge Phenotype Files
+
+```{r crete_pheno}
+pheno_df <- df_1 %>%
+  dplyr::inner_join(df_3, by = "projid") %>%
+  dplyr::inner_join(df_2, by = "Sample") %>%
+  dplyr::filter(paste0(.data$Sentrix_ID, "_", .data$Sentrix_Position) %in% df_idat$label) %>%
+  dplyr::filter(!is.na(.data$braaksc)) %>%
+  dplyr::filter(.data$race == 1) %>%
+  dplyr::filter(.data$spanish != 1)
+
+write.csv(pheno_df, file.path(download_dir, "full_pheno.csv"))
+saveRDS(pheno_df, file.path(download_dir, "full_pheno.RDS"))
+```
+
+## Filter Phenotype Columns
+
+```{r filter_pheno}
+pheno_df <- pheno_df %>%
+  dplyr::mutate(braaksc = as.integer(as.numeric(.data$braaksc))) %>%
+  dplyr::mutate(stage3 = ifelse(
+    .data$braaksc < 3, "0-2",
+    ifelse(.data$braaksc < 5, "3-4", "5-6")
+  )) %>%
+  dplyr::mutate(Sentrix = paste0(.data$Sentrix_ID, "_", .data$Sentrix_Position)) %>%
+  dplyr::mutate(Slide = .data$Sentrix_ID) %>%
+  dplyr::mutate(sex = ifelse(.data$msex == 1, "MALE", "FEMALE")) %>%
+  dplyr::mutate(
+    age_death = ifelse(
+      is.na(.data$age_death),
+      .data$age_at_visit_max,
+      .data$age_death
+    )
+  ) %>%
+  dplyr::mutate(
+    age_death = as.numeric(ifelse(.data$age_death == "90+", "90", .data$age_death))
+  ) %>%
+  dplyr::mutate(msex = ifelse(.data$msex == 1, "MALE", "FEMALE")) %>%
+  dplyr::mutate(ceradsc = as.integer(.data$ceradsc)) %>%
+  dplyr::select(
+    "Sample",
+    "Sentrix_ID", 
+    "Sentrix_Position",
+    "Sample_Plate",
+    "Sample_Well",
+    "Sample_Group",
+    "batch",
+    "Sentrix",
+    "Slide", 
+    "projid", 
+    "Study", 
+    "msex",
+    "educ", 
+    "race",
+    "spanish",
+    "apoe_genotype",
+    "age_at_visit_max",
+    "age_first_ad_dx",
+    "age_death",
+    "cts_mmse30_first_ad_dx",
+    "cts_mmse30_lv",
+    "pmi",
+    "braaksc",
+    "ceradsc",
+    "cogdx",
+    "stage3",
+    "sex"
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(Sentrix_ID = as.character(.data$Sentrix_ID))
+```
+
+# Filter Phenotype Data
+
+## Filter by Age and PMI
+
+```{r get_old}
+pheno_df <- pheno_df %>%
+  dplyr::filter(
+    .data$age_death >= 65
+  ) %>%
+  dplyr::filter(!is.na(.data$pmi)) %>%
+  dplyr::filter(.data$pmi <= 72)
+```
+
+## Filter to Normal Data
+
+```{r get_normal}
+pheno_df <- pheno_df %>%
+  dplyr::filter(.data$stage3 %in% "0-2")
+```
+
+# Collect and Filter Assay Data
+
+## Read in idat Data
+
+```{r read_idat}
+# read idat data
+assay_data <- minfi::read.metharray.exp(
+  base = idat_dir,
+  recursive = TRUE,
+  verbose = FALSE,
+  force = TRUE
+)
+
+# adjust sample names
+df_names <- stringr::str_split_fixed(colnames(assay_data), pattern = "_", n = 2)
+colnames(df_names) <- c("Sentrix_ID", "Sentrix_Position")
+df_names <- df_names %>%
+  as.data.frame() %>%
+  dplyr::left_join(
+  pheno_df, by = c("Sentrix_ID", "Sentrix_Position")
+) %>%
+  tidyr::replace_na(list(Sample = "Missing"))
+colnames(assay_data) <- df_names$Sample
+```
+
+## Filter to Matching Phenotype Data
+
+```{r filter_idat}
+assay_data <- assay_data[,pheno_df$Sample]
+```
+
+# Predict Age
+
+## Get Beta Values
+
+```{r age_beta}
+suppressMessages({
+  beta_data <- minfi::getBeta(assay_data)
+})
+```
+
+## Summarize Missing Cortical Probe Values
+
+```{r coef_summary}
+brain_coef <- read.csv(file.path(reference_dir, "brain_coef.csv"), row.names = 1)
+beta_coef <- beta_data[row.names(beta_data) %in% brain_coef$probe, ]
+beta_missing <- is.na(beta_coef)
+
+df_missing <- data.frame(
+  probes = c(
+    "CorticalClock probe count (N)",
+    "CorticalClock probes in data (N)",
+    "Sample count (N)",
+    "Probes with Missing Values (N)",
+    "Samples with Missing Values (N)",
+    "Total Missing Values (N)"
+  ),
+  value = c(
+    nrow(brain_coef),
+    nrow(beta_coef),
+    ncol(beta_coef),
+    sum(rowSums(beta_missing) > 0),
+    sum(colSums(beta_missing) > 0),
+    sum(beta_missing)
+  )
+)
+
+df_missing %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Number of NAs in CorticalClock Probe Beta Values"
+  )
+```
+
+## Run Prediction
+
+```{r}
+pheno <- CorticalClock(
+  beta_data,
+  pheno_df,
+  paste0(reference_dir, "/"),
+  "Sample",
+  "age_death"
+)
+
+pheno_df$age_prediction <- as.numeric(pheno$brainpred)
+```
+
+# Save
+
+```{r save, eval = TRUE}
+saveRDS(assay_data, file.path(compile_dir, "organized_assay.RDS"))
+saveRDS(pheno_df, file.path(compile_dir, "organized_pheno.RDS"))
+write.csv(pheno_df, file.path(compile_dir, "organized_pheno.csv"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

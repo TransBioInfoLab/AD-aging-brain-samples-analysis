@@ -1,0 +1,354 @@
+---
+title: "Get ROSMAP data RNA and Residuals"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(stats)
+  library(plyr)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(SummarizedExperiment)
+  library(TCGAbiolinks)
+  
+  library(parallel)
+  library(doParallel)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+reference_dir <- file.path(code_dir, "Reference_Files")
+rna_dir <- file.path(base_dir, "coMethDMR_metaAnalysis/DNAm_RNA/data")
+```
+
+# Get RNA Data
+
+## Load RNA Data
+
+```{r load_rna}
+set_1_df <- read.table(
+  file = file.path(rna_dir, "ROSMAP_RNAseq_FPKM_gene_plates_1_to_6_normalized.tsv"),
+  sep = "\t",
+  header = TRUE,
+  row.names = 1
+)[,-1]
+
+set_2_df <- read.table(
+  file = file.path(rna_dir, "ROSMAP_RNAseq_FPKM_gene_plates_7_to_8_normalized.tsv"),
+  sep = "\t",
+  header = TRUE,
+  row.names = 1
+)[,-1]
+
+rna_df <- cbind(set_1_df, set_2_df)
+genelist <- as.character(row.names(rna_df))
+genelist <- stringr::str_split_i(genelist, "[.]", i = 1)
+row.names(rna_df) <- genelist
+colnames(rna_df) <- stringr::str_replace_all(colnames(rna_df), "[-]", "_")
+```
+
+## Get Phenotype Information
+
+```{r load_pheno}
+pheno_df <- readRDS(
+  file.path(rosmap_dir, "rna_dnam", "dnam_processed_data.RDS")
+) %>%
+  SummarizedExperiment::colData() %>%
+  data.frame()
+
+pheno_norm_df <- readRDS(
+  file.path(rosmap_dir, "rna_dnam", "dnam_processed_normal.RDS")
+) %>%
+  SummarizedExperiment::colData() %>%
+  data.frame()
+
+pheno_ad_df <- readRDS(
+  file.path(rosmap_dir, "rna_dnam", "dnam_processed_ad.RDS")
+) %>%
+  SummarizedExperiment::colData() %>%
+  data.frame()
+```
+
+## Filter RNA to Phenotype
+
+We filter our RNA data to samples overlapping with the DNA methylation data that we worked with
+
+```{r filter_samples}
+rna_df <- rna_df[,pheno_df$rna_label]
+rna_norm_df <- rna_df[,pheno_norm_df$rna_label]
+rna_ad_df <- rna_df[,pheno_ad_df$rna_label]
+
+row.names(pheno_df) <- colnames(rna_df)
+row.names(pheno_norm_df) <- colnames(rna_norm_df)
+row.names(pheno_ad_df) <- colnames(rna_ad_df)
+```
+
+# Filter to Target Genes
+
+We are only interested in genes that are connected to significant probes or DMRs, so we can immediately filter down to those
+
+## Get Non-Expressing Genes
+
+We have no interest in genes that are never expressed
+
+```{r filter_missing}
+rna_df <- rna_df[rowSums(rna_df > 0) > 0, ]
+```
+
+## Get associations
+
+```{r filter_target_genes}
+cpg_df <- readRDS(
+  file.path(rosmap_dir, "rna_dnam", "dnam_ad_data.RDS")
+) %>%
+  SummarizedExperiment::rowData() %>%
+  data.frame() %>%
+  dplyr::mutate(start = .data$pos, end = .data$pos, strand = .data$strand_rev)
+
+dmr_df <- readRDS(
+  file.path(rosmap_dir, "rna_dnam", "dmr_ad_data.RDS")
+) %>%
+  SummarizedExperiment::rowData() %>%
+  data.frame()
+
+dmr_gr <- dmr_df %>%
+  GenomicRanges::makeGRangesFromDataFrame()
+cpg_gr <- cpg_df %>%
+  GenomicRanges::makeGRangesFromDataFrame()
+
+dmr_genes <- MethReg::get_region_target_gene(
+  regions.gr = dmr_gr,
+  genome = "hg19",
+  method = "window",
+  window.size = 500 * 10 ^ 3,
+  rm.promoter.regions.from.distal.linking = FALSE
+) %>%
+  dplyr::filter(.data$target %in% row.names(rna_df)) %>%
+  dplyr::select(ens = "target", gene = "target_symbol") %>%
+  dplyr::distinct()
+
+cpg_genes <- MethReg::get_region_target_gene(
+  regions.gr = cpg_gr,
+  genome = "hg19",
+  method = "window",
+  window.size = 500 * 10 ^ 3,
+  rm.promoter.regions.from.distal.linking = FALSE
+) %>%
+  dplyr::filter(.data$target %in% row.names(rna_df)) %>%
+  dplyr::select(ens = "target", gene = "target_symbol") %>%
+  dplyr::distinct()
+
+row_df <- rbind(dmr_genes, cpg_genes) %>%
+  dplyr::distinct()
+
+rna_df <- rna_df[row_df$ens,]
+rna_norm_df <- rna_norm_df[row_df$ens,]
+rna_ad_df <- rna_ad_df[row_df$ens,]
+```
+
+# Convert RNA Data
+
+## Convert to log2 scale
+
+```{r log2_data}
+rna_df <- log2(1 + rna_df)
+rna_norm_df <- log2(1 + rna_norm_df)
+rna_ad_df <- log2(1 + rna_ad_df)
+```
+
+## Filter Out non-Expressing Genes
+
+We filter out any genes that aren't expressed at a rate of FPKM >= 10 in at least 10 normal and 10 AD samples
+
+```{r filter_genes}
+threshold <- log2(1 + 0.5)
+row_df <- row_df %>%
+  dplyr::mutate(
+    count_total = rowSums(rna_df > threshold),
+    count_norm = rowSums(rna_norm_df > threshold),
+    count_ad = rowSums(rna_ad_df > threshold)
+  )
+
+summary_df <- data.frame(
+  metric = c(
+    "All genes",
+    "Expressed in 10+ normal samples",
+    "Expressed in 10+ AD samples",
+    "Expressed in all normal samples",
+    "Expressed in all AD samples",
+    "Expressed in 10+ AD and 10+ normal smaples",
+    "Expressed in all samples"
+  ),
+  counts = c(
+    nrow(row_df),
+    sum(row_df$count_norm >= 10),
+    sum(row_df$count_ad >= 10),
+    sum(row_df$count_norm == ncol(rna_norm_df)),
+    sum(row_df$count_ad == ncol(rna_ad_df)),
+    sum((row_df$count_norm >= 10) & (row_df$count_ad >= 10)),
+    sum(row_df$count_total == ncol(rna_df))
+  )
+)
+
+to_keep <- (row_df$count_norm >= 10 & row_df$count_ad >= 10)
+
+row_df <- row_df[to_keep,]
+rna_df <- rna_df[row_df$ens,]
+rna_norm_df <- rna_norm_df[row_df$ens,]
+rna_ad_df <- rna_ad_df[row_df$ens,]
+
+summary_df
+```
+
+# Get Residuals
+
+We evaluate residuals as
+
+$$
+log_2(FPKM + 1) ~ sex + age_death + log_2(ENO2 + 1) + log_2(OLIG2 + 1) +
+    log_2(CD34 + 1) + log_2(CD68 + 1) + log_2(GFAP + 1)
+$$
+
+## Define Functions
+
+```{r residual_function}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+get_lm_resid <- function(M_mat, pheno_df, fo) {
+  parallel <- TRUE
+  parallel <- start_parallel(parallel, cores = 8)
+  
+  formula <- stats::as.formula(fo)
+  M_mat <- as.matrix(M_mat)
+  
+  resid <- plyr::adply(
+    M_mat,
+    .margins = 1,
+    .fun = function(m_value) {
+      
+    data <- data.frame(m_value = m_value, pheno_df)
+    lm_mod <- stats::lm(
+      formula,
+      data = data
+    )
+    
+    residuals(lm_mod)
+    },
+    .progress = "time",
+    .parallel = parallel
+  )
+  
+  stop_parallel(parallel)
+  
+  row.names(resid) <- resid[,1]
+  resid[,1] <- NULL
+  colnames(resid) <- colnames(M_mat)
+  
+  resid
+}
+```
+
+## Calculate Residuals
+
+```{r calculate_residual}
+fo <-  paste0(
+  "m_value ~ sex + age_death + markers_CD34 + markers_ENO2 ",
+  "+ markers_CD68 + markers_GFAP + markers_OLIG2"
+)
+resid_df <- get_lm_resid(rna_df, pheno_df, fo)
+resid_norm_df <- get_lm_resid(rna_norm_df, pheno_norm_df, fo)
+resid_ad_df <- get_lm_resid(rna_ad_df, pheno_ad_df, fo)
+```
+
+## Create Summarized Experiments
+
+```{r create_se}
+rna_se <- SummarizedExperiment::SummarizedExperiment(
+  list(rna = resid_df),
+  colData = pheno_df,
+  rowData = row_df
+)
+
+rna_norm_se <- SummarizedExperiment::SummarizedExperiment(
+  list(rna = resid_norm_df),
+  colData = pheno_norm_df,
+  rowData = row_df
+)
+
+rna_ad_se <- SummarizedExperiment::SummarizedExperiment(
+  list(rna = resid_ad_df),
+  colData = pheno_ad_df,
+  rowData = row_df
+)
+```
+
+# Save Results
+
+```{r save}
+saveRDS(rna_se, file = file.path(rosmap_dir, "rna_dnam", "rnaseq_data.RDS"))
+saveRDS(rna_norm_se, file = file.path(rosmap_dir, "rna_dnam", "rnaseq_norm_data.RDS"))
+saveRDS(rna_ad_se, file = file.path(rosmap_dir, "rna_dnam", "rnaseq_ad_data.RDS"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```

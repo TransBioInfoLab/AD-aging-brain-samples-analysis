@@ -1,0 +1,894 @@
+---
+title: "Run line by line preprocessing of DNA methylation data"
+subtitle: "Preprocess Rosmap DNA methylation data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(minfi)
+  library(SummarizedExperiment)
+  library(EpiDISH)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  library(wateRmelon)
+  library(lumi)
+  library(ggplot2)
+  library(DMRcate)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+dataset_dir <- file.path(code_dir, "DATASETS", "Rosmap")
+read_dir <- file.path(dataset_dir, "03_sample_data")
+save_dir <- file.path(dataset_dir, "04_qc_data")
+```
+
+## Define Functions
+
+```{r function, echo = FALSE}
+qc_fix_beta <- function(
+    dnam_data, na_threshold_probe = 0.3, na_threshold_sample = 10000
+) {
+  if (inherits(dnam_data, "SummarizedExperiment")) {
+    return(
+      qc_fix_summary_beta(
+        dnam_data,
+        na_threshold_probe = na_threshold_probe,
+        na_threshold_sample = na_threshold_sample
+      )
+    )
+  } else {
+    return(
+      qc_fix_assay_beta(
+        dnam_data,
+        na_threshold_probe = na_threshold_probe,
+        na_threshold_sample = na_threshold_sample
+      )
+    )
+  }
+}
+
+qc_fix_summary_beta <- function(
+    summarized_data, na_threshold_probe = 0.3, na_threshold_sample = 10000
+) {
+  fixed_result <- qc_fix_assay_beta(
+    summarized_data,
+    na_threshold_probe = na_threshold_probe,
+    na_threshold_sample = na_threshold_sample
+  )
+  
+  fixed_data <- fixed_result$imputed_data
+  na_stats <- fixed_result$na_stats
+
+  to_keep <- summarized_data$Sample %in% colnames(fixed_data)
+  summarized_data <- summarized_data[,to_keep]
+  
+  assay_data <- SummarizedExperiment::assays(summarized_data)$DNAm
+
+  if (inherits(assay_data, "RGChannelSet")) {
+    assay_data <- assay_data %>%
+      minfi::preprocessRaw()
+    probes <- row.names(assay_data)
+    to_remove <- probes[!(probes %in% row.names(fixed_data))]
+    assay_data <- minfi::subsetByLoci(
+      assay_data,
+      excludeLoci = to_remove,
+      keepControls = TRUE,
+      keepSnps = TRUE
+    )
+    to_keep <- row.names(summarized_data) %in% row.names(assay_data)
+    summarized_data <- summarized_data[to_keep, ]
+  } else if (inherits(assay_data, "MethylSet")) {
+    to_keep <- row.names(summarized_data) %in% row.names(fixed_data)
+    summarized_data <- summarized_data[to_keep, ]
+  } else {
+    metadata <- S4Vectors::metadata(summarized_data)
+    pheno_df <- data.frame(SummarizedExperiment::colData(summarized_data))
+    
+    rowData <- data.frame(
+      probes = row.names(fixed_data),
+      array = metadata$array,
+      genome = metadata$genome
+    )
+    row.names(rowData) <- rowData$probes
+    
+    row.names(pheno_df) <- pheno_df$Sample
+    summarized_data <- SummarizedExperiment::SummarizedExperiment(
+      assays = list("DNAm" = fixed_data),
+      rowData = rowData,
+      metadata = metadata,
+      colData = pheno_df
+    )
+  }
+
+  list(summarized_data = summarized_data, na_stats = na_stats)
+}
+
+convert_data_to_beta <- function(assay_data) {
+  if (inherits(assay_data, "SummarizedExperiment")) {
+    assay_data <- SummarizedExperiment::assays(assay_data)$DNAm
+  }
+  if (inherits(assay_data, "RGChannelSet")) {
+    assay_data <- minfi::preprocessRaw(assay_data)
+  }
+  if (inherits(assay_data, "MethylSet")) {
+    assay_data <- minfi::getBeta(assay_data)
+  }
+  
+  if (!is.matrix(assay_data)) {
+    stop("Unsupported data type. Please provide RGChannelSet, MethylSet, or SummarizedExperiment.")
+  }
+  
+  assay_data
+}
+
+get_na_stats <- function(
+    assay_data, na_threshold_probe = 0.3, na_threshold_sample = 10000
+) {
+  sample_counts <- colSums(is.na(assay_data))
+  probe_rates <- rowMeans(is.na(assay_data))
+  
+  list(
+    na_probes = sum(probe_rates > 0),
+    na_samples = sum(sample_counts > 0),
+    filter_probes = sum(probe_rates >= na_threshold_probe),
+    filter_samples = sum(sample_counts >= na_threshold_sample)
+  )
+}
+
+get_data_dimensions <- function(
+    dnam_data, na_threshold_probe = 0.3, na_threshold_sample = 10000
+) {
+  assay_data <- convert_data_to_beta(dnam_data)
+  
+  data_stats <- get_na_stats(
+    assay_data, na_threshold_probe, na_threshold_sample
+  )
+  
+  data_stats$samples <- ncol(assay_data)
+  data_stats$probes <- nrow(assay_data)
+  
+  data_stats
+}
+
+qc_fix_assay_beta <- function(
+    assay_data, na_threshold_probe = 0.3, na_threshold_sample = 10000,
+    seed = 23
+) {
+  assay_data <- convert_data_to_beta(assay_data)
+  na_stats <- get_na_stats(assay_data, na_threshold_probe, na_threshold_sample)
+
+  # filter samples and probes
+  sample_counts <- colSums(is.na(assay_data))
+  assay_data <- assay_data[, sample_counts < na_threshold_sample]
+  probe_rates <- rowMeans(is.na(assay_data))
+  assay_data <- assay_data[probe_rates < na_threshold_probe, ]
+
+  # impute data
+  if (sum(is.na(assay_data)) > 0) {
+    # sink("/dev/null")
+    # set.seed(seed)
+    # imputed_data <- impute::impute.knn(assay_data, maxp = 10000)
+    # sink()
+    # assay_data <- imputed_data$data
+    na_ind <- which(is.na(assay_data), arr.ind = TRUE)
+    assay_data[na_ind] <- rowMeans(assay_data, na.rm = TRUE)[na_ind[,1]]
+  }
+
+  list(
+    imputed_data = assay_data,
+    na_stats = na_stats
+  )
+}
+
+create_summarized_experiment <- function(
+    pheno_df, assay_data, array = c("HM450", "EPIC"), genome = c("hg19", "hg38")
+) {
+  
+  rowData <- data.frame(
+    probes = row.names(assay_data),
+    array = array,
+    genome = genome
+  )
+  row.names(rowData) <- rowData$probes
+  
+  row.names(pheno_df) <- pheno_df$Sample
+  SummarizedExperiment::SummarizedExperiment(
+    assays = list("DNAm" = assay_data),
+    rowData = rowData,
+    metadata = list("genome" = genome, "array" = array),
+    colData = as.data.frame(pheno_df)
+  )
+}
+```
+
+## Read In Data
+
+```{r}
+assay_data <- readRDS(file.path(read_dir, "organized_assay.RDS"))
+pheno_df <- readRDS(file.path(read_dir, "organized_pheno.RDS"))
+
+dnam_data <- create_summarized_experiment(
+  pheno_df, assay_data, array = "HM450", genome = "hg19"
+)
+
+# clean memory
+rm(assay_data)
+rm(pheno_df)
+gc()
+```
+
+## Create Dataframe to Record Progess
+
+```{r initalize_df}
+qc_summary_df <- data.frame(
+  order = 1:12,
+  step = "",
+  samples = "",
+  probes = "",
+  R_package = ""
+)
+```
+
+## Get Starting Parameters
+
+```{r start_param}
+# get initial probe and sample counts
+methyl_data <- minfi::preprocessRaw(
+  SummarizedExperiment::assays(dnam_data)$DNAm
+)
+qc_summary_df[1, "step"] <- "Initial input data"
+qc_summary_df[1, "samples"] <- ncol(methyl_data)
+qc_summary_df[1, "probes"] <- nrow(methyl_data)
+qc_summary_df[1, "R_package"] <- ""
+
+# clean memory
+rm(methyl_data)
+gc()
+```
+
+# Evaluate Samples
+
+## Predict Celltype Proportions
+
+```{r}
+# predict cell type proportions
+predict_df <- minfi::estimateCellCounts(
+  SummarizedExperiment::assays(dnam_data)$DNAm,
+  compositeCellType = "DLPFC",
+  cellTypes = c("NeuN_neg", "NeuN_pos"),
+  referencePlatform = "IlluminaHumanMethylation450k",
+  verbose = FALSE
+) %>% data.frame
+
+# record cell type proportions
+dnam_data$NeuN_neg <- predict_df$NeuN_neg
+dnam_data$NeuN_pos <- predict_df$NeuN_pos
+
+# Record Progress
+package <- paste0(
+  "minfi::estimateCellCounts (compositeCellType = DLPFC, ",
+  "cellTypes = c('NeuN_neg', 'NeuN_pos'), ",
+  "referencePlatform = IlluminaHumanMethylation450k)"
+)
+qc_summary_df[2, "step"] <- "predict cell type proportions"
+qc_summary_df[2, "samples"] <- ncol(dnam_data)
+qc_summary_df[2, "probes"] <- qc_summary_df[1, "probes"]
+qc_summary_df[2, "R_package"] <- package
+```
+
+## Predict Sex, and filter out sex mis-match
+
+```{r predict_sex}
+# Run Prediction
+suppressWarnings({
+  suppressMessages({
+    assay_genome <- minfi::mapToGenome(SummarizedExperiment::assays(dnam_data)$DNAm)
+    assay_sex <- minfi::getSex(assay_genome)  
+  })
+})
+dnam_data$sex_predicted <- ifelse(
+  assay_sex$predictedSex %in% c("M", "Male", "MALE"),
+  "MALE",
+  "FEMALE"
+)
+
+dnam_data <- dnam_data[,dnam_data$sex == dnam_data$sex_predicted]
+
+# Record Progress
+qc_summary_df[3, "step"] <- "predict sample sex and filter samples that don't match actual sex"
+qc_summary_df[3, "samples"] <- ncol(dnam_data)
+qc_summary_df[3, "probes"] <- qc_summary_df[1, "probes"]
+qc_summary_df[3, "R_package"] <- "minfi::mapToGenome, minfi:getSex"
+```
+
+## Filter by Bisulfite Levels
+
+```{r filter_bisulfite}
+# Run Prediction
+dnam_data$bisulfite <- wateRmelon::bscon(
+  SummarizedExperiment::assays(dnam_data)$DNAm
+)
+
+# Filter Data
+to_keep <- dnam_data$bisulfite >= 85
+dnam_data <- dnam_data[, to_keep]
+
+# Record Progress
+qc_summary_df[4, "step"] <- "select samples with bisulfite conversion rate >= 85%"
+qc_summary_df[4, "samples"] <- ncol(dnam_data)
+qc_summary_df[4, "probes"] <- qc_summary_df[1, "probes"]
+qc_summary_df[4, "R_package"] <- package <- "wateRmelon::bscon"
+```
+
+# Perform Probe QC Filtering
+
+## Filter Probes by Detection P-value
+
+```{r filter_detP}
+# get detection p-values
+assay_data <- SummarizedExperiment::assays(dnam_data)$DNAm
+suppressWarnings({
+  detP <- minfi::detectionP(assay_data, type = "mu+u")
+  assay_data <- minfi::preprocessRaw(assay_data)
+  assay_data <- minfi::getBeta(assay_data)
+})
+fail_score <- rowMeans(detP > 0.01)
+
+# filter samples
+assay_data <- assay_data[fail_score == 0, ]
+
+# create new SummarizedExperiment with MethylSet assay data
+pheno_df <- data.frame(SummarizedExperiment::colData(dnam_data))
+dnam_data <- create_summarized_experiment(
+  pheno_df, assay_data, array = "HM450", genome = "hg19"
+)
+
+# record progress
+qc_summary_df[5, "step"] <- "select probes with detection P < 0.01 for 100% of samples"
+qc_summary_df[5, "samples"] <- ncol(dnam_data)
+qc_summary_df[5, "probes"] <- nrow(dnam_data)
+qc_summary_df[5, "R_package"] <- "minfi::detectionP(type = 'm+u')"
+
+# clean memory
+rm(assay_data)
+gc()
+```
+
+## Filter to Probes Starting with 'cg'
+
+```{r filter_cg}
+# filter by probe names
+dnam_data <- dnam_data[grep("cg", row.names(dnam_data)), ]
+
+# record progress
+qc_summary_df[6, "step"] <- "select probes whose names starts with 'cg'"
+qc_summary_df[6, "samples"] <- ncol(dnam_data)
+qc_summary_df[6, "probes"] <- nrow(dnam_data)
+qc_summary_df[6, "R_package"] <- "grep('cg')"
+```
+
+## Filter Probes by SNP distance and cross hybridization
+
+```{r}
+assay_data <- SummarizedExperiment::assays(dnam_data)$DNAm
+
+assay_data <- DMRcate::rmSNPandCH(
+  assay_data,
+  dist = 5,
+  mafcut = 0.01,
+  and = TRUE,
+  rmcrosshyb = TRUE,
+  rmXY = FALSE
+)
+
+dnam_data <- dnam_data[row.names(assay_data),]
+# record progress
+qc_summary_df[7, "step"] <- "filtered out probes by SNP proximity and cross hybridization"
+qc_summary_df[7, "samples"] <- ncol(dnam_data)
+qc_summary_df[7, "probes"] <- nrow(dnam_data)
+qc_summary_df[7, "R_package"] <- "DMRcate::rmSNPandCH(dist = 5, mafcut = 0.01, and = TRUE, rmcrosshyb = TRUE)"
+```
+
+## Filter Out XY Probes
+
+```{r}
+assay_data <- SummarizedExperiment::assays(dnam_data)$DNAm
+
+assay_data <- DMRcate::rmSNPandCH(
+  assay_data,
+  dist = 5,
+  mafcut = 0.01,
+  and = TRUE,
+  rmcrosshyb = TRUE,
+  rmXY = TRUE
+)
+
+dnam_data <- dnam_data[row.names(assay_data),]
+# record progress
+qc_summary_df[8, "step"] <- "ffiltered out probes on the xy chromosome"
+qc_summary_df[8, "samples"] <- ncol(dnam_data)
+qc_summary_df[8, "probes"] <- nrow(dnam_data)
+qc_summary_df[8, "R_package"] <- "DMRcate::rmSNPandCH(rmXY = TRUE)"
+```
+
+# Normalize Data
+
+## Missing Values
+
+```{r impute_1, echo = FALSE}
+# impute beta values
+fixed_data <- qc_fix_beta(dnam_data, na_threshold_probe = 0.3, na_threshold_sample = 10000)
+dnam_data <- fixed_data$summarized_data
+na_stats <- fixed_data$na_stats
+
+# record progress
+qc_summary_df[9, "step"] <- "Filtered and imputed missing values"
+qc_summary_df[9, "samples"] <- ncol(dnam_data)
+qc_summary_df[9, "probes"] <- nrow(dnam_data)
+qc_summary_df[9, "R_package"] <- "rowMeans(na.rm = TRUE)"
+
+# print missing stats
+df_missing <- data.frame(
+  metrics = c(
+    "Probes with NA values",
+    "Probes with > 30% NA values",
+    "Samples with NA values",
+    "Samples with > 10,000 NA vlaues"
+  ),
+  counts = c(
+    na_stats$na_probes,
+    na_stats$filter_probes,
+    na_stats$na_samples,
+    na_stats$filter_samples
+  )
+)
+
+df_missing
+```
+
+## Between Sample Normalization
+
+### Pre-Normalization Boxplot
+
+```{r boxplot_prelim}
+assay_data <- SummarizedExperiment::assays(dnam_data)$DNAm
+boxplot(assay_data, col = "gray")
+```
+
+### Quantile Normalization
+
+```{r norm_lumi}
+# use lumi for quantile normalization
+set.seed(42)
+assay_data <- lumi::lumiN(assay_data, method = "quantile", verbose = FALSE)
+```
+
+### Post-Normalization Boxplot
+
+```{r boxplot_post}
+boxplot(assay_data, col = "gray")
+```
+
+## Within Sample Normalization
+
+### Pre-Normalization Density Plot
+
+```{r density_pre}
+annotType <- IlluminaHumanMethylation450kanno.ilmn12.hg19::Manifest
+annotType$designTypeNumeric <- ifelse(annotType$Type == "I", 1, 2)
+index <- match(row.names(assay_data),row.names(annotType))
+type12 <- annotType$designTypeNumeric[index]
+
+df_density <- assay_data[,1:9] %>%
+  as.data.frame() %>%
+  dplyr::mutate(probe_type = as.character(type12)) %>%
+  tidyr::pivot_longer(!probe_type, names_to = "sample", values_to = "beta")
+
+ggplot2::ggplot(df_density, mapping = ggplot2::aes(x = beta, color = probe_type)) +
+  ggplot2::geom_density() +
+  ggplot2::facet_wrap(~sample, ncol = 3)
+```
+
+### BMIQ Normalization
+
+```{r norm_bmiq}
+# run BMIQ normalization
+if (Sys.info()["sysname"] == "Windows"){
+  cluster <- parallel::makeCluster(8)
+  doParallel::registerDoParallel(cluster)
+} else {
+  doParallel::registerDoParallel(8)
+}
+
+assay_data <- plyr::aaply(
+  assay_data, 2,
+  function(x){
+    set.seed(42)
+    norm_ls <- wateRmelon::BMIQ(
+      beta.v = x,
+      design.v = type12,
+      plots = FALSE,
+      pri = FALSE,
+      nfit = 50000
+    )
+    return (norm_ls$nbeta)
+  },.progress = "time", .parallel = TRUE
+)
+
+doParallel::stopImplicitCluster()
+
+assay_data <- t(assay_data)
+colnames(assay_data) <- dnam_data$Sample
+
+# record progress
+qc_summary_df[10, "step"] <- "Normalized Data"
+qc_summary_df[10, "samples"] <- ncol(assay_data)
+qc_summary_df[10, "probes"] <- nrow(assay_data)
+qc_summary_df[10, "R_package"] <- paste0(
+  "lumi::lumiN(method = 'quantile')",
+  " ; ",
+  "wateRmelon::BMIQ(plots = FALSE, pri = FALSE, nfit = 50000)"
+)
+```
+
+### Post-Normalization Density Plot
+
+```{r density_post}
+df_density <- assay_data[,1:9] %>%
+  as.data.frame() %>%
+  dplyr::mutate(probe_type = as.character(type12)) %>%
+  tidyr::pivot_longer(!probe_type, names_to = "sample", values_to = "beta")
+
+ggplot2::ggplot(df_density, mapping = ggplot2::aes(x = beta, color = probe_type)) +
+  ggplot2::geom_density() +
+  ggplot2::facet_wrap(~sample)
+```
+
+## Missing Values
+
+```{r impute_2, echo = FALSE}
+# impute beta values
+fixed_data <- qc_fix_beta(assay_data, na_threshold_probe = 0.3, na_threshold_sample = 10000)
+assay_data <- fixed_data$imputed_data
+na_stats <- fixed_data$na_stats
+
+# record progress
+qc_summary_df[11, "step"] <- "Filtered and imputed missing values"
+qc_summary_df[11, "samples"] <- ncol(assay_data)
+qc_summary_df[11, "probes"] <- nrow(assay_data)
+qc_summary_df[11, "R_package"] <- "rowMeans(na.rm = TRUE)"
+
+# print missing stats
+df_missing <- data.frame(
+  metrics = c(
+    "Probes with NA values",
+    "Probes with > 30% NA values",
+    "Samples with NA values",
+    "Samples with > 10,000 NA vlaues"
+  ),
+  counts = c(
+    na_stats$na_probes,
+    na_stats$filter_probes,
+    na_stats$na_samples,
+    na_stats$filter_samples
+  )
+)
+
+df_missing
+```
+
+```{r recreate_summarized_data, echo = FALSE}
+# convert back to summarized experiment
+dnam_data <- dnam_data[,colnames(assay_data)]
+pheno_df <- data.frame(SummarizedExperiment::colData(dnam_data))
+dnam_data <- create_summarized_experiment(
+  pheno_df, assay_data, array = "HM450", genome = "hg19"
+)
+```
+
+# Statistical Analysis
+
+## Correlation Violin Plots
+
+```{r violin, fig.height = 18}
+df_corr <- cor(assay_data, assay_data)
+
+df_gender <- data.frame(
+  Sample = dnam_data$Sample,
+  sex = dnam_data$sex
+)
+
+df_plot <- df_corr %>%
+  as.data.frame() %>%
+  dplyr::add_rownames("Sample") %>%
+  tidyr::pivot_longer(!Sample, names_to = "Sample2", values_to = "correlation") %>%
+  dplyr::filter(.data$Sample != .data$Sample2) %>%
+  dplyr::mutate(xpos = 1) %>%
+  dplyr::left_join(df_gender, by = c("Sample" = "Sample"))
+
+ggplot2::ggplot(df_plot, mapping = ggplot2::aes(x = xpos, y = correlation, color = sex)) +
+  ggplot2::geom_violin() +
+  ggplot2::facet_wrap(~Sample, ncol = 8) +
+  theme(
+    strip.text = element_text(size = 6)
+  ) +
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank()
+  )
+```
+
+## PCA
+
+### Get PCA Data
+
+```{r generate_pca}
+# get assay data of 50,000 most variable probes
+assay_data <- SummarizedExperiment::assays(dnam_data)$DNAm
+sds <- apply(assay_data, 1, stats::sd, na.rm = TRUE)
+sdsSorted <- order(sds, decreasing = TRUE)
+assay_data <- assay_data[sdsSorted, ]
+assay_data <- assay_data[1:50000, ]
+
+# run QC filter in case probes with 0 variance are left
+pca_data <- t(assay_data)
+variance <- apply(pca_data, 2, stats::var)
+pca_data <- pca_data[, variance > 0]
+assay_data <- assay_data[variance > 0, ]
+
+# run PCA
+pca_comp <- stats::prcomp(
+  pca_data,
+  center = TRUE,
+  scale = TRUE
+)
+```
+
+### Convert PCA data to data frames
+
+```{r pca_df}
+# Get PCA summary statistics
+percentVar <- pca_comp$sdev^2 / sum(pca_comp$sdev^2)
+pca_vals <- data.frame(
+  statistic = c(
+    "pc1_mean", "pc2_mean", "pc1_sd", "pc2_sd", "pc1_var", "pc2_var"),
+  value = c(
+    mean(pca_comp$x[,1]),
+    mean(pca_comp$x[,2]),
+    stats::sd(pca_comp$x[,1]),
+    stats::sd(pca_comp$x[,2]),
+    percentVar[[1]],
+    percentVar[[2]]
+  )
+)
+row.names(pca_vals) <- pca_vals$statistic
+
+# Combine PCA coordinate data with phenotype data
+outlier_cutoff = 3
+pca_df <- dnam_data %>%
+  SummarizedExperiment::colData() %>%
+  data.frame() %>%
+  dplyr::mutate(
+    pc1 = pca_comp$x[,1],
+    pc2 = pca_comp$x[,2]
+  ) %>%
+  dplyr::mutate(
+    pc1_zscore = ((.data$pc1 - pca_vals["pc1_mean", "value"]) /
+                    pca_vals["pc1_sd", "value"]),
+    pc2_zscore = ((.data$pc2 - pca_vals["pc2_mean", "value"]) /
+                    pca_vals["pc2_sd", "value"])
+  )
+
+# Identify Outliers
+pca_df <- pca_df %>%
+  dplyr::mutate(
+    pc1_outlier = abs(.data$pc1_zscore) > outlier_cutoff,
+    pc2_outlier = abs(.data$pc2_zscore) > outlier_cutoff
+  ) %>%
+  dplyr::mutate(
+    is_outlier = .data$pc1_outlier | .data$pc2_outlier
+  )
+dnam_data$pc1 <- pca_df$pc1
+dnam_data$pc2 <- pca_df$pc2
+dnam_data$is_outlier <- pca_df$is_outlier
+dnam_data <- dnam_data[,!pca_df$is_outlier]
+```
+
+### Record Progress
+
+```{r pca_progress}
+qc_summary_df[12, "step"] <- "identify samples within 3 standard deviations from mean of PC1 or PC2 as outliers"
+qc_summary_df[12, "samples"] <- ncol(dnam_data)
+qc_summary_df[12, "probes"] <- nrow(dnam_data)
+qc_summary_df[12, "R_package"] <- "stats::prcomp (center = TRUE, scale = TRUE)"
+```
+
+# Display Results
+
+## Get Sample Statistics
+
+```{r}
+df_distribution <- data.frame(
+  statistic = c(
+    "Sample size (N)",
+    "Males (N)",
+    "Age at death (mean)",
+    "Age at death (sd)",
+    "Predicted age at death (mean)",
+    "Predicted age at death (sd)",
+    "Neuron proportion (mean)",
+    "Neuron Proportion (sd)"
+  ),
+  value = c(
+    ncol(dnam_data),
+    sum(dnam_data$sex == "MALE"),
+    round(mean(dnam_data$age_death), 2),
+    round(stats::sd(dnam_data$age_death), 2),
+    round(mean(dnam_data$age_prediction), 2),
+    round(stats::sd(dnam_data$age_prediction), 2),
+    round(mean(dnam_data$NeuN_pos), 2),
+    round(stats::sd(dnam_data$NeuN_pos), 2)
+  )
+)
+
+df_distribution %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Sample Distribution Statistics"
+  )
+```
+
+## Plot PCA
+
+```{r plot_pca}
+# color points by gender
+color_column <- "sex"
+
+# label outliers
+plot_df <- pca_df %>%
+  dplyr::mutate(
+    label_name = ifelse(.data$is_outlier, .data$Sample, ""))
+
+subset_df <- plot_df %>%
+  dplyr::filter(.data$is_outlier)
+
+# create plot
+p <- ggplot2::ggplot(
+    data = plot_df, mapping = ggplot2::aes(
+      x = pc1, y = pc2, color = !!sym(color_column))) +
+    ggplot2::geom_point(size = 1) +
+    ggplot2::theme_bw() +
+    ggplot2::xlab(paste0(
+      "PC1: ", round(pca_vals["pc1_var", "value"] * 100), "% variance")) +
+    ggplot2::ylab(paste0(
+      "PC2: ", round(pca_vals["pc2_var", "value"] * 100), "% variance")) +
+    ggplot2::geom_hline(
+      yintercept = (pca_vals["pc2_mean", "value"] +
+                      outlier_cutoff * pca_vals["pc2_sd", "value"]),
+      linetype = "dashed") +
+    ggplot2::geom_hline(
+      yintercept = (pca_vals["pc2_mean", "value"] -
+                      outlier_cutoff * pca_vals["pc2_sd", "value"]),
+      linetype = "dashed") +
+    ggplot2::geom_vline(
+      xintercept = (pca_vals["pc1_mean", "value"] +
+                      outlier_cutoff * pca_vals["pc1_sd", "value"]),
+      linetype = "dashed") +
+    ggplot2::geom_vline(
+      xintercept = (pca_vals["pc1_mean", "value"] -
+                      outlier_cutoff * pca_vals["pc1_sd", "value"]),
+      linetype = "dashed") +
+    ggrepel::geom_text_repel(
+      data = subset_df,
+      ggplot2::aes(label = label_name),
+      show.legend = FALSE, max.overlaps = 1000
+    )
+
+p
+```
+
+## Show Probes and Samples at Each Step
+
+```{r show_df_2, echo=FALSE}
+qc_summary_df %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Sample and Probe Counts"
+  )
+```
+
+# Save Data
+
+```{r save}
+pheno_df <- dnam_data %>%
+  SummarizedExperiment::colData() %>%
+  data.frame()
+
+saveRDS(
+  dnam_data,
+  file = file.path(save_dir, "processed_data.RDS")
+)
+write.csv(
+  pheno_df,
+  file = file.path(save_dir, "metadata.csv"),
+  row.names = FALSE
+)
+write.csv(
+  pca_df,
+  file = file.path(save_dir, "pca_data.csv"),
+  row.names = FALSE
+)
+write.csv(
+  pca_vals,
+  file = file.path(save_dir, "pca_statistics.csv"),
+  row.names = FALSE
+)
+write.csv(
+  qc_summary_df,
+  file = file.path(save_dir, "preprocess_step_counts.csv"),
+  row.names = FALSE
+)
+ggplot2::ggsave(
+  file.path(save_dir, "pca_plot.png"),
+  plot = p
+)
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

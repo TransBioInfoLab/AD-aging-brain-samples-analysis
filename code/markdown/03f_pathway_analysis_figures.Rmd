@@ -1,0 +1,338 @@
+---
+title: "Generate bar plots for pathway analysis results"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(ggpubr)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+lola_dir <- file.path(analysis_dir, "LOLACore")
+result_dir <- file.path(analysis_dir, "analysis-results")
+save_dir <- file.path(result_dir, "pathway_enrichment")
+code_dir <- file.path(analysis_dir, "code")
+reference_dir <- file.path(code_dir, "Reference_Files")
+```
+
+## Load Results Data
+
+```{r}
+read_result_file <- function(fname) {
+  read.csv(
+    file = file.path(save_dir, fname)
+  ) %>%
+    dplyr::mutate(
+      analysis = ifelse(stringr::str_detect(.data$analysis, "All sig"), "all", .data$analysis),
+      analysis = ifelse(stringr::str_detect(.data$analysis, "Hyper sig"), "hyper", .data$analysis),
+      analysis = ifelse(stringr::str_detect(.data$analysis, "Hypo sig"), "hypo", .data$analysis)
+    ) %>%
+    dplyr::mutate(total_count = .data$foreground_count + .data$background_count) %>%
+    dplyr::mutate(
+      foreground_probes = round(
+        .data$foreground_count / .data$foreground_frequency * 100
+      )
+    )%>%
+    dplyr::mutate(
+      total_probes = round(
+        .data$total_count / .data$background_frequency * 100
+      )
+    ) %>%
+    tidyr::replace_na(
+      list(foreground_probes = 0, total_probes = 0)
+    ) %>%
+    dplyr::mutate(foreground_probes = as.integer(.data$foreground_probes)) %>%
+    dplyr::mutate(total_probes = as.integer(.data$total_probes)) %>%
+    dplyr::filter(.data$analysis != "all") %>%
+    dplyr::select(
+      "analysis",
+      "features",
+      "foreground_frequency",
+      "background_frequency",
+      "foreground_probes",
+      "total_probes",
+      "p_value"
+    )
+}
+
+cpg_illum_df <- read_result_file("sig_enrichment_cpg_illumina.csv")
+cpg_chromm_df <- read_result_file("sig_enrichment_cpg_chrommatin.csv") %>%
+  dplyr::mutate(
+    features = factor(.data$features, levels = sort(unique(.data$features)))
+  )
+dmr_illum_df <- read_result_file("sig_enrichment_dmr_illumina.csv") %>%
+  dplyr::filter(.data$features != "ExonBnd")
+dmr_chromm_df <- read_result_file("sig_enrichment_dmr_chrommatin.csv") %>%
+  dplyr::mutate(
+    features = factor(.data$features, levels = sort(unique(.data$features)))
+  )
+both_illum_df <- read_result_file("sig_enrichment_both_illumina.csv")
+both_chromm_df <- read_result_file("sig_enrichment_both_chrommatin.csv")
+```
+
+# Create Plots
+
+## Define Functions
+
+```{r}
+get_bar_plot_df <- function(region_df) {
+  fg_df <- region_df %>%
+    dplyr::select(
+      category = "analysis",
+      "features",
+      frequency = "foreground_frequency",
+      "p_value"
+    )
+  bg_df <- region_df %>%
+    dplyr::select(
+      category = "analysis",
+      "features",
+      frequency = "background_frequency"
+    ) %>%
+    dplyr::mutate(category = "background", p_value = 1) %>%
+    dplyr::distinct()
+  
+  rbind(
+    fg_df, bg_df
+  ) %>%
+    dplyr::mutate(
+      category = factor(.data$category, levels = c("background", "hypo", "hyper"))
+    )
+}
+
+get_signif_label <- function(p_value) {
+  label1 <- ifelse(p_value >= 0.05, "", "*")
+  label2 <- ifelse(p_value >= 0.01, "", "*")
+  label3 <- ifelse(p_value >= 0.001, "", "*")
+  
+  paste0(label1, label2, label3)
+}
+
+create_bar_plot <- function(region_df) {
+  plot_df <- get_bar_plot_df(region_df) %>%
+    dplyr::mutate(sig_label = get_signif_label(.data$p_value))
+  
+  plot <- ggpubr::ggbarplot(
+    plot_df,
+    x = "features",
+    y = "frequency",
+    fill = "category",
+    color = NA,
+    ylab = "Percentage CpGs (%)",
+    xlab = "Genomic Features",
+    width = 0.8,
+    position = ggplot2::position_dodge(0.8)
+  ) +
+    ggplot2::theme(
+      legend.title = ggplot2::element_blank(),
+      axis.text = element_text(size = 5),
+      axis.title = element_text(size = 6),
+      plot.title = element_text(size = 8)
+    ) + 
+    ggpubr::rotate_x_text(angle = 90) +
+    # ggplot2::geom_text(
+    #   ggplot2::aes(label = sig_label, group = category), 
+    #   position = position_dodge(width = .9), 
+    #   vjust = 0.75,
+    #   hjust = 1.1,
+    #   size = 7 / .pt,
+    #   angle = 270
+    # ) +
+    ggplot2::ylim(0, max(plot_df$frequency * 1.1))
+  
+  plot
+}
+
+label_bar_plot <- function(plot, title, region_df) {
+  total_count <- region_df$total_probes[[1]]
+  hyper_count <- region_df %>%
+    dplyr::filter(.data$analysis == "hyper") %>%
+    dplyr::pull("foreground_probes") %>%
+    unique() %>%
+    max()
+  hypo_count <- region_df %>%
+    dplyr::filter(.data$analysis == "hypo") %>%
+    dplyr::pull("foreground_probes") %>%
+    unique() %>%
+    max()
+  
+  plot +
+    ggplot2::ggtitle(title) +
+    ggplot2::scale_fill_manual(
+      name = "", 
+      labels = c(
+        paste0("Evaluated probes (n = ", total_count, ")"),
+        paste0("Significant w/ negative estimates (n = ", hypo_count, ")"),
+        paste0("Significant w/ positive estimates (n = ", hyper_count, ")")
+      ),
+      values = c(
+        "background" = "#BBBBBB",
+        "hypo" = "#1F77B4",
+        "hyper" = "#FF7F0D"
+      )
+    )
+}
+
+plot_cpg_data <- function(region_df, title, position = c("top", "inside")) {
+  position <- match.arg(position)
+  plot <- create_bar_plot(region_df)
+  plot <- label_bar_plot(plot, title, region_df)
+  
+  if (position == "top") {
+    plot <- plot +
+      ggplot2::guides(
+        fill = guide_legend(
+          position = "top",
+          ncol = 3,
+          theme = ggplot2::theme(text = element_text(size = 7)),
+          byrow = TRUE
+        )
+      ) +
+      ggplot2::theme(
+        legend.box.spacing = unit(0, "cm"),
+        legend.key.size = unit(0.2, 'cm'),
+        legend.justification = "center",
+        legend.key = element_rect(size = 6, fill = "white", colour = NA),
+        legend.key.spacing.y = unit(0, "cm"),
+        plot.title = ggplot2::element_text(margin = ggplot2::margin(0,0,0,0)),
+        plot.margin = ggplot2::unit(c(0,0.75,0,0.75), "in")
+      )
+  } else {
+    plot <- plot +
+      ggplot2::guides(
+        fill = guide_legend(
+          position = "inside",
+          ncol = 1,
+          theme = ggplot2::theme(text = element_text(size = 6))
+        )
+      ) +
+      ggplot2::theme(
+        legend.key.size = unit(0.2, 'cm'),
+        legend.justification = "left",
+        legend.key = element_rect(size = 6, fill = "white", colour = NA),
+        legend.key.spacing.y = unit(0, "cm"),
+        legend.position.inside = c(0.20, 0.9)
+      )
+  }
+  
+  plot
+}
+```
+
+## Create Plots
+
+```{r}
+cpg_chromm_plot <- plot_cpg_data(
+  cpg_chromm_df,
+  "Single cpg meta-analysis probes ChroMHMM:E073 - 15 coreMarks segments",
+  position = "top"
+)
+
+dmr_chromm_plot <- plot_cpg_data(
+  dmr_chromm_df,
+  "Region meta-analysis probes ChroMHMM:E073 - 15 coreMarks segments",
+  position = "top"
+)
+
+cpg_illum_plot <- plot_cpg_data(
+  cpg_illum_df,
+  "Single cpg meta-analysis probes",
+  position = "inside"
+)
+
+dmr_illum_plot <- plot_cpg_data(
+  dmr_illum_df,
+  "Region meta-analysis probes",
+  position = "inside"
+)
+
+both_chromm_plot <- plot_cpg_data(
+  both_chromm_df,
+  "Region and single cpg meta-analysis probes ChroMHMM:E073 - 15 coreMarks segments",
+  position = "top"
+)
+
+both_illum_plot <- plot_cpg_data(
+  both_illum_df,
+  "Region and single cpg meta-analysis probes",
+  position = "inside"
+)
+```
+
+## Show Plots
+
+```{r width = 4, height = 4}
+cpg_illum_plot
+```
+
+```{r width = 8, height = 4}
+cpg_chromm_plot
+```
+
+```{r width = 4, height = 4}
+dmr_illum_plot
+```
+
+```{r width = 8, height = 4}
+dmr_chromm_plot
+```
+
+```{r width = 4, height = 4}
+both_illum_plot
+```
+
+```{r width = 8, height = 4}
+both_chromm_plot
+```
+
+## Save Plots
+
+```{r}
+pdf(file.path(save_dir, "barplots.pdf"), width = 6, height = 7)
+gridExtra::grid.arrange(
+  gridExtra::arrangeGrob(
+    cpg_illum_plot,
+    dmr_illum_plot,
+    ncol = 2, nrow = 1
+  ),
+  gridExtra::arrangeGrob(
+    cpg_chromm_plot,
+    dmr_chromm_plot,
+    ncol = 1,
+    nrow = 2
+  ),
+  heights = c(2.5,7),
+  ncol = 1
+)
+dev.off()
+```
+

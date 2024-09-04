@@ -1,0 +1,374 @@
+---
+title: "Download DNA methylation data, and pre-filter to normal, prefrontal data"
+subtitle: "Download and pre-filter BDR data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  
+  library(GEOquery)
+  library(Biobase)
+  library(stringr)
+  library(plyr)
+  library(downloader)
+  library(stats)
+  library(ggplot2)
+  
+  source("../R/CorticalClock.r", local=TRUE)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS", "BDR")
+download_dir <- file.path(dataset_dir, "01_download")
+idat_dir <- file.path(dataset_dir, "02_idat_data")
+compile_dir <- file.path(dataset_dir, "03_sample_data")
+reference_dir <- file.path(code_dir, "Reference_Files")
+result_dir <- file.path(analysis_dir, "analysis-results")
+```
+
+# Download Data
+
+## Get Phenotype Data
+
+```{r download_pheno}
+geo_id <- "GSE197305"
+
+# Get Phenotype
+geo_data <- GEOquery::getGEO(
+  GEO = geo_id,
+  destdir = download_dir
+)
+
+pheno_df <- Biobase::pData(
+  geo_data[[paste0(geo_id, "_series_matrix.txt.gz")]]
+) %>%
+  data.frame()
+
+# Get sample target .idat file information
+supp_columns <- c(
+  colnames(pheno_df)[stringr::str_starts(colnames(pheno_df),
+                                         "supplementary_file")],
+  "geo_accession"
+)
+supp_df <- pheno_df[,supp_columns]
+
+# save data
+saveRDS(pheno_df, file.path(download_dir, "full_pheno.RDS"))
+saveRDS(supp_df, file.path(download_dir, "full_supplementary.RDS"))
+write.csv(pheno_df, file.path(download_dir, "full_pheno.csv"))
+```
+
+## Get idat Data
+
+```{r download_idat, eval = FALSE}
+files_ls <- dplyr::select(supp_df, -"geo_accession") %>%
+  unlist() %>%
+  unname() %>%
+  unique()
+
+plyr::a_ply(files_ls, .margins = 1, .fun = function(url) {
+  output_name <- file.path(idat_dir, basename(url))
+  output_unzip <- stringr::str_sub(output_name, 1, nchar(output_name) - 3)
+  if(!file.exists(output_name) & !file.exists(output_unzip)) {
+    downloader::download(url, output_name)
+    GEOquery::gunzip(output_name)
+  }
+}, .progress = "time")
+```
+
+# Filter Phenotype Data
+
+## Filter to Cortical Data
+
+```{r filter_cortical}
+pheno_df <- read.csv(file.path(download_dir, "full_pheno.csv"), row.names = 1) %>%
+  dplyr::filter(.data$brain.region.ch1 == "Prefrontal")
+```
+
+## Cluster Data
+
+### Run Clustering
+
+```{r cluster_cluster}
+df_k <- pheno_df %>%
+  dplyr::select(
+    neun = "cell.proportion.neun..ch1",
+    sox10 = "cell.proportion.sox10..ch1",
+    negative = "cell.proportion.double.negative.ch1"
+  ) %>% dplyr::mutate(
+    neun = as.numeric(.data$neun),
+    sox10 = as.numeric(.data$sox10),
+    negative = as.numeric(.data$negative)
+  )
+
+# run clustering
+set.seed(1022023)
+k_value <- 3
+cluster_results <- stats::kmeans(df_k, centers = k_value)
+df_k$clustering <- cluster_results$cluster
+```
+
+### Label Clusters
+
+```{r cluster_label}
+# get sox10 proportion means by cluster
+df_stats <- df_k %>%
+  dplyr::group_by(.data$clustering) %>%
+  dplyr::summarise(ave_sox = mean(.data$sox10)) %>%
+  dplyr::arrange(.data$ave_sox) %>%
+  dplyr::mutate(braak = c("0-II", "III-IV", "V-VI"))
+
+# merge to original data
+df_k <- df_k %>%
+  dplyr::left_join(df_stats, by = "clustering")
+pheno_df$braak <- df_k$braak
+df_k$`Braak stage` <- df_k$braak
+```
+
+### Plot Clustering Results
+
+```{r cluster_plot}
+p1 <- ggplot2::ggplot(
+  df_k,
+  mapping = ggplot2::aes(x = neun, y = sox10, color = `Braak stage`)
+) +
+  ggplot2::geom_point(size = 0.5) +
+  ggplot2::ylab("SOX10+") +
+  ggplot2::xlab("NeuN+") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) +
+  ggplot2::theme(legend.position = c(0.85, 0.82))
+
+p2 <- ggplot2::ggplot(
+  df_k,
+  mapping = ggplot2::aes(x = negative, y = sox10, color = `Braak stage`)
+) +
+  ggplot2::geom_point(size = 0.5) +
+  ggplot2::ylab("SOX10+") +
+  ggplot2::xlab("NeuN-/SOX10-") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) +
+  ggplot2::theme(legend.position = c(0.85, 0.82))
+
+p3 <- ggplot2::ggplot(
+  df_k,
+  mapping = ggplot2::aes(x = neun, y = negative, color = `Braak stage`)
+) +
+  ggplot2::geom_point(size = 0.5) +
+  ggplot2::xlab("NeuN+") +
+  ggplot2::ylab("NeuN-/SOX10-") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) +
+  ggplot2::theme(legend.position = c(0.85, 0.82))
+
+pdf(
+  file.path(result_dir, "meta_analysis", "BDR_Braaks_Plots.pdf"),
+  width = 5,
+  height = 5
+)
+p1
+p2
+p3
+dev.off()
+
+pdf(
+  file.path(result_dir, "meta_analysis", "BDR_Braaks_Plots_Side.pdf"),
+  width = 12,
+  height = 4
+)
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+dev.off()
+
+gridExtra::grid.arrange(p1, p2, p3, ncol = 2)
+```
+
+## Filter to Normal Data
+
+```{r filter_braak}
+pheno_df <- pheno_df %>%
+  dplyr::filter(.data$braak == "0-II")
+```
+
+## Rename and Filter Phenotype Columns
+
+```{r filter_columns}
+pheno_df <- pheno_df %>%
+  tidyr::separate(
+    "source_name_ch1",
+    into = c("sentrix_id", "slide"),
+    sep = "_",
+    remove = TRUE
+  ) %>%
+  dplyr::mutate(age = NA) %>%
+  dplyr::select(
+    sample = "geo_accession",
+    "sentrix_id",
+    "slide",
+    "age",
+    sex = "gender.ch1",
+    stage = "braak",
+    region = "brain.region.ch1"
+  ) %>%
+  dplyr::mutate(
+    sex = ifelse(.data$sex == "female", "FEMALE", .data$sex),
+    sex = ifelse(.data$sex == "male", "MALE", .data$sex),
+    age = as.numeric(.data$age)
+  )
+```
+
+# Collect and Filter Assay Data
+
+## Read in idat Data
+
+```{r read_idat}
+# read idat data
+assay_data <- minfi::read.metharray.exp(
+  base = idat_dir,
+  recursive = TRUE,
+  verbose = FALSE,
+  force = TRUE
+)
+
+# adjust sample names
+colnames(assay_data) <- as.character(
+  stringr::str_split_fixed(colnames(assay_data), pattern = "_", n=3)[,1]
+)
+```
+
+## Filter to Matching Phenotype Data
+
+```{r filter_idat}
+assay_data <- assay_data[,pheno_df$sample]
+```
+
+# Predict Age
+
+## Get Beta Values
+
+```{r age_beta}
+suppressMessages({
+  beta_data <- minfi::getBeta(assay_data)
+})
+```
+
+## Summarize Missing Cortical Probe Values
+
+```{r coef_summary}
+brain_coef <- read.csv(file.path(reference_dir, "brain_coef.csv"), row.names = 1)
+beta_coef <- beta_data[row.names(beta_data) %in% brain_coef$probe, ]
+beta_missing <- is.na(beta_coef)
+
+df_missing <- data.frame(
+  probes = c(
+    "CorticalClock probe count (N)",
+    "CorticalClock probes in data (N)",
+    "Sample count (N)",
+    "Probes with Missing Values (N)",
+    "Samples with Missing Values (N)",
+    "Total Missing Values (N)"
+  ),
+  value = c(
+    nrow(brain_coef),
+    nrow(beta_coef),
+    ncol(beta_coef),
+    sum(rowSums(beta_missing) > 0),
+    sum(colSums(beta_missing) > 0),
+    sum(beta_missing)
+  )
+)
+
+df_missing %>%
+  DT::datatable(
+    filter = 'top',
+    style = "bootstrap",
+    extensions = 'Buttons',
+    options = list(
+      scrollX = TRUE, 
+      dom = 'Bfrtip',
+      buttons = I('colvis'),
+      keys = TRUE, 
+      pageLength = 10
+    ), 
+    rownames = FALSE,
+    caption = "Number of NAs in CorticalClock Probe Beta Values"
+  )
+```
+
+## Run Prediction
+
+```{r}
+pheno <- CorticalClock(
+  beta_data,
+  pheno_df,
+  paste0(reference_dir, "/"),
+  "sample",
+  "age"
+)
+
+pheno_df <- pheno_df %>%
+  dplyr::mutate(age_prediction = as.numeric(pheno$brainpred)) %>%
+  dplyr::mutate(age_truncated = ifelse(
+    .data$age_prediction > 90,
+    90,
+    .data$age_prediction
+  ))
+```
+
+# Save
+
+```{r save, eval = TRUE}
+saveRDS(assay_data, file.path(compile_dir, "organized_assay.RDS"))
+saveRDS(pheno_df, file.path(compile_dir, "organized_pheno.RDS"))
+write.csv(pheno_df, file.path(compile_dir, "organized_pheno.csv"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

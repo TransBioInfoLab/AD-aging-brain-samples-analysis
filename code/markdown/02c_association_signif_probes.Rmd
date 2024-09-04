@@ -1,0 +1,96 @@
+---
+title: "05_signif_probes"
+author: "David Lukacsovich"
+date: "2024-04-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Define Directories
+
+```{r}
+library(dplyr)
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+bdr_dir <- file.path(dataset_dir, "BDR")
+result_dir <- file.path(analysis_dir, "analysis-results")
+```
+
+## Read in Data
+
+```{r}
+rosmap_data <- readRDS(file.path(
+  rosmap_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+
+bdr_data <- readRDS(file.path(
+  bdr_dir,
+  "04_qc_data",
+  "processed_data.RDS"
+  )
+)
+```
+
+# Subset Data
+
+## Load Probe Statistics
+
+```{r}
+meta_df <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+)
+```
+
+## Get Target Probes
+
+```{r}
+probe_rosmap <- meta_df %>%
+  dplyr::filter(is.na(.data$BDR_estimate)) %>%
+  dplyr::arrange(.data$pvalue_final_bacon) %>%
+  head(n = 5) %>%
+  dplyr::pull("probe")
+
+probe_bdr <- meta_df %>%
+  dplyr::filter(is.na(.data$ROSMAP_estimate)) %>%
+  dplyr::arrange(.data$pvalue_final_bacon) %>%
+  head(n = 5) %>%
+  dplyr::pull("probe")
+
+probe_meta <- meta_df %>%
+  dplyr::filter(!is.na(.data$BDR_estimate)) %>%
+  dplyr::filter(!is.na(.data$ROSMAP_estimate)) %>%
+  dplyr::arrange(.data$pvalue_final_bacon) %>%
+  head(n = 5) %>%
+  dplyr::pull("probe")
+```
+
+## Subset Datasets
+
+```{r}
+rosmap_beta <- SummarizedExperiment::assays(rosmap_data)$DNAm[c(probe_meta, probe_rosmap),]
+bdr_beta <- SummarizedExperiment::assays(bdr_data)$DNAm[c(probe_meta, probe_bdr),]
+```
+
+## Save Results
+
+```{r}
+write.csv(rosmap_beta, file = file.path(result_dir, "signif_probes_ROSMAP.csv"))
+write.csv(bdr_beta, file = file.path(result_dir, "signif_probes_BDR.csv"))
+```
+

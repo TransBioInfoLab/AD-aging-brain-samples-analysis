@@ -1,0 +1,288 @@
+---
+title: "Recalculate ROSMAP data DMR medians"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(SummarizedExperiment)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+rna_dir <- file.path(base_dir, "coMethDMR_metaAnalysis/DNAm_RNA/data")
+```
+
+# Get Data
+
+## Load dnam data
+
+```{r load_dnam}
+dnam_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_data.RDS")
+)
+
+dnam_norm_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_normal.RDS")
+)
+
+dnam_ad_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_ad.RDS")
+)
+
+row_df <- SummarizedExperiment::rowData(dnam_data) %>%
+  data.frame()
+```
+
+## Load DMR information
+
+```{r load_dmr}
+dmr_ref <- read.csv(
+  file = file.path(
+    analysis_dir,
+    "analysis-results",
+    "meta_analysis",
+    "meta_analysis_summary.csv"
+  )
+) %>%
+  as.data.frame() %>%
+  tidyr::separate(
+    .data$DMR,
+    into = c("seqnames", "start", "end"),
+    sep = ":|-",
+    remove = FALSE
+  ) %>%
+  dplyr::select("DMR", "combp_DMR", "seqnames", "start", "end", "combp_probes") %>%
+  dplyr::mutate(start = as.integer(.data$start), end = as.integer(.data$end))
+```
+
+## get DMR probes
+
+```{r dmr_probes}
+dmr_gr <- GenomicRanges::GRanges(
+  seqnames = dmr_ref$seqnames,
+  ranges = IRanges::IRanges(start = dmr_ref$start, end = dmr_ref$end)
+)
+cpg_gr <- GenomicRanges::GRanges(
+  seqnames = row_df$chr,
+  ranges = IRanges::IRanges(start = row_df$pos, end = row_df$pos)
+)
+
+overlap_df <- GenomicRanges::findOverlaps(dmr_gr, cpg_gr) %>%
+  as.data.frame()
+
+row_df$index <- 1:nrow(row_df)
+dmr_ref$index <- 1:nrow(dmr_ref)
+summ_df <- row_df %>%
+  dplyr::inner_join(overlap_df, by = c("index" = "subjectHits")) %>%
+  dplyr::group_by(.data$queryHits) %>%
+  dplyr::summarise(
+    DMR_probes = paste0(.data$probe, collapse = ";")
+  )
+dmr_ref <- dmr_ref %>%
+  dplyr::left_join(summ_df, by=c("index" = "queryHits")) %>%
+  dplyr::select(-"index") %>%
+  dplyr::select(-"seqnames", -"start", -"end")
+```
+
+# Calculate Medians
+
+## Define Functions
+
+```{r function_median}
+calculate_medians <- function(exp_mat, cpg_df, dmr_df) {
+  # get medians
+  probes <- row.names(exp_mat)
+  med_df <- exp_mat %>%
+    data.frame() %>%
+    tibble::rownames_to_column("probe") %>%
+    dplyr::inner_join(cpg_df, by = "probe") %>%
+    dplyr::select(-"probe") %>%
+    dplyr::group_by(.data$DMR) %>%
+    dplyr::summarise(dplyr::across(tidyselect::where(is.numeric), ~median(.x, na.rm = TRUE)))
+  
+  # reorder
+  med_df <- med_df[match(dmr_df$DMR, med_df$DMR),]
+  
+  med_df
+}
+
+get_dmr_medians <- function(dmr_ref, dnam_data, dmr_col, probe_col) {
+  dmr_ref <- dmr_ref[,c(dmr_col, probe_col)] %>%
+    dplyr::distinct()
+  colnames(dmr_ref) <- c("DMR", "probes")
+  
+  target_df <- dmr_ref %>%
+    dplyr::mutate(probe = stringr::str_split(.data$probes, ";")) %>%
+    tidyr::unnest("probe") %>%
+    dplyr::select(-"probes") %>%
+    as.data.frame()
+  
+  dnam_beta <- SummarizedExperiment::assays(dnam_data)$DNAm
+  M_mat <- minfi::logit2(dnam_beta)
+  
+  dmr_df <- calculate_medians(M_mat, target_df, dmr_ref) %>%
+      as.data.frame() %>%
+    tibble::column_to_rownames("DMR")
+  
+  dmr_df
+}
+```
+
+## Calculate the Medians
+
+```{r calculate_median}
+dmr_df <- get_dmr_medians(dmr_ref, dnam_data, "combp_DMR", "combp_probes")
+dmr_norm_df <- get_dmr_medians(dmr_ref, dnam_norm_data, "combp_DMR", "combp_probes")
+dmr_ad_df <- get_dmr_medians(dmr_ref, dnam_ad_data, "combp_DMR", "combp_probes")
+```
+
+# Get Residuals
+
+## Define Functions
+
+```{r association_functions}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+get_lm_resid <- function(M_mat, pheno_df, fo) {
+  parallel <- TRUE
+  parallel <- start_parallel(parallel, cores = 8)
+  
+  formula <- stats::as.formula(fo)
+  M_mat <- as.matrix(M_mat)
+  
+  resid <- plyr::adply(
+    M_mat,
+    .margins = 1,
+    .fun = function(m_value) {
+      
+    data <- data.frame(m_value = m_value, pheno_df)
+    lm_mod <- stats::lm(
+      formula,
+      data = data
+    )
+    
+    residuals(lm_mod)
+    },
+    .progress = "time",
+    .parallel = parallel
+  )
+  
+  stop_parallel(parallel)
+  
+  row.names(resid) <- resid[,1]
+  resid[,1] <- NULL
+  colnames(resid) <- colnames(M_mat)
+  
+  resid
+}
+
+create_se <- function(dmr_df, pheno_df) {
+  row_df <- data.frame(
+    dmr = row.names(dmr_df)
+  ) %>%
+    tidyr::separate(
+      .data$dmr,
+      into = c("seqnames", "start", "end"),
+      sep = ":|-",
+      remove = FALSE
+    )
+  row.names(row_df) <- row_df$dmr
+  
+  dmr_se <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(dmr = dmr_df),
+    colData = pheno_df,
+    rowData = row_df
+  )
+}
+
+calculate_dmr_residuals <- function(dmr_df, dnam_data) {
+  pheno_df <- dnam_data %>%
+    SummarizedExperiment::colData() %>%
+    data.frame()
+  
+  fo <-  "m_value ~ sex + NeuN_pos + batch + Sample_Plate + age_death"
+  dmr_df <- get_lm_resid(dmr_df, pheno_df, fo)
+  colnames(dmr_df) <- pheno_df$Sample
+  row.names(pheno_df) <- pheno_df$Sample
+  
+  create_se(dmr_df, pheno_df)
+}
+```
+
+## Calculate Residuals
+
+```{r residual}
+dmr_se <- calculate_dmr_residuals(dmr_df, dnam_data)
+dmr_norm_se <- calculate_dmr_residuals(dmr_norm_df, dnam_norm_data)
+dmr_ad_se <- calculate_dmr_residuals(dmr_ad_df, dnam_ad_data)
+```
+
+# Save Results
+
+```{r save}
+saveRDS(dmr_se, file = file.path(rosmap_dir, "rna_dnam", "dmr_data.RDS"))
+saveRDS(dmr_norm_se, file = file.path(rosmap_dir, "rna_dnam", "dmr_norm_data.RDS"))
+saveRDS(dmr_ad_se, file = file.path(rosmap_dir, "rna_dnam", "dmr_ad_data.RDS"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+

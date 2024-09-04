@@ -1,0 +1,409 @@
+---
+title: "Run meta analysis comparing Rosmap and BDR DNA methylation data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(plyr)
+  library(meta)
+  library(minfi)
+  library(GenomicRanges)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  library(rGREAT)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+bdr_dir <- file.path(dataset_dir, "BDR")
+reference_dir <- file.path(code_dir, "Reference_Files")
+```
+
+## Read in Data
+
+```{r read_data}
+rosmap_data <- read.csv(file.path(rosmap_dir, "05_association_data", "age_association.csv"))
+bdr_data <- read.csv(file.path(bdr_dir, "05_association_data", "age_association.csv"))
+```
+
+## Create Merged Data
+
+```{r merge_data}
+cohort_df <- rosmap_data %>%
+  dplyr::inner_join(bdr_data, by = "probe", suffix = c("_ROSMAP", "_BDR"))
+```
+
+# Run Meta Analysis
+
+## Define Functions
+
+```{r meta_functions, echo = FALSE}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+get_direction <- function(estimate) {
+  ifelse(
+    is.na(estimate) | (estimate == 0),
+    ".",
+    ifelse(estimate > 0, "+", "-")
+  )
+}
+```
+
+## Run Meta Analysis
+
+```{r meta_run}
+datasets <- c("ROSMAP", "BDR")
+parallel <- start_parallel(TRUE, cores = 8)
+
+meta_df <- plyr::adply(
+  .data = cohort_df, 
+  .margins = 1, 
+  .fun =  function(probe_data){
+    
+    est <- probe_data[paste("estimate_bacon", datasets, sep = "_")] %>%
+      as.numeric()
+    
+    direction <- paste0(get_direction(est), collapse = "")
+  
+    se <- probe_data[paste("std_error_bacon", datasets, sep = "_")] %>%
+      as.numeric()
+    
+    probe_df <- data.frame(
+      cohort = datasets,
+      est = est,
+      se = se,
+      stringsAsFactors = FALSE
+    )
+    
+    set.seed(23)
+    f <- meta::metagen(
+      TE = est,
+      seTE = se,
+      data = probe_df
+    )
+    
+    result <- tibble::tibble(
+      probe = probe_data$probe,
+      estimate_bacon = f$TE.fixed,
+      standard_error_bacon = f$seTE.fixed,
+      pvalue_fixed_bacon = f$pval.fixed,
+      pvalue_q = f$pval.Q,
+      direction_bacon = direction
+    )
+    
+    result
+  }  , .progress = "time",
+  .parallel = parallel,
+  .id = NULL
+)
+
+stop_parallel(parallel)
+```
+
+## Finalize P-Values
+
+```{r meta_pvalues}
+meta_df <- meta_df %>%
+  dplyr::mutate(
+    pvalue_final_bacon = .data$pvalue_fixed_bacon
+  )
+```
+
+## Add in Single-ton CpGs
+
+```{r singleton}
+# create singleton dataframe
+unique_df <- rosmap_data %>%
+  dplyr::full_join(bdr_data, by = "probe", suffix = c("_ROSMAP", "_BDR")) %>%
+  dplyr::filter(!(.data$probe %in% cohort_df$probe))
+
+# add estimate bacon
+unique_df$estimate_bacon <- rowMaxs(
+  unique_df[,c("estimate_BDR", "estimate_ROSMAP")] %>%
+    as.matrix(),
+  na.rm = TRUE
+)
+unique_df$pvalue_final_bacon <- rowMins(
+  unique_df[,c("pvalue_bacon_BDR", "pvalue_bacon_ROSMAP")] %>%
+    as.matrix(),
+  na.rm = TRUE
+)
+unique_df$standard_error_bacon <- rowMins(
+  unique_df[,c("std_error_bacon_BDR", "std_error_bacon_ROSMAP")] %>%
+    as.matrix(),
+  na.rm = TRUE
+)
+unique_df$direction_bacon <- paste0(
+  get_direction(unique_df$estimate_bacon_ROSMAP),
+  get_direction(unique_df$estimate_bacon_BDR)
+)
+
+# Line up columns
+columns <- colnames(meta_df)
+columns <- columns[!(columns %in% colnames(unique_df))]
+for (column in columns) {
+  unique_df[,column] <- NA
+}
+unique_df <- unique_df[,colnames(meta_df)]
+
+# merge datasets
+meta_df <- rbind(
+  meta_df,
+  unique_df
+) %>%
+  dplyr::mutate(
+    fdr_bacon_inclusive = stats::p.adjust(.data$pvalue_final_bacon, method = "fdr")
+  ) %>%
+  dplyr::arrange(.data$pvalue_final_bacon)
+```
+
+# Label Results
+
+## Annotate Results
+
+```{r labels_annotate}
+anno_df_hm450 <- utils::data(
+  "IlluminaHumanMethylation450kanno.ilmn12.hg19",
+  package = "IlluminaHumanMethylation450kanno.ilmn12.hg19"
+) %>%
+  minfi::getAnnotation() %>%
+  GenomicRanges::makeGRangesFromDataFrame(
+    start.field = "pos", end.field = "pos", keep.extra.columns = TRUE
+  ) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "Name",
+    "seqnames",
+    "start",
+    "end",
+    "Relation_to_Island",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group"
+  )
+
+anno_df_epic <- utils::data(
+  "IlluminaHumanMethylationEPICanno.ilm10b4.hg19",
+  package = "IlluminaHumanMethylationEPICanno.ilm10b4.hg19"
+) %>%
+  minfi::getAnnotation() %>%
+  GenomicRanges::makeGRangesFromDataFrame(
+    start.field = "pos", end.field = "pos", keep.extra.columns = TRUE
+  ) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "Name",
+    "seqnames",
+    "start",
+    "end",
+    "Relation_to_Island",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group"
+  ) %>%
+  dplyr::filter(!(.data$Name %in% anno_df_hm450$Name))
+
+anno_df <- rbind(anno_df_hm450, anno_df_epic)
+
+meta_df <- meta_df %>%
+  dplyr::left_join(anno_df, by = c("probe" = "Name"))
+```
+
+## Add GREAT Annotation
+
+```{r labels_great}
+great_EPIC <- readRDS(file.path(reference_dir, "GREAT_EPIC.RDS")) %>%
+  dplyr::select("cpg", "GREAT_annotation")
+great_450 <- readRDS(file.path(reference_dir, "GREAT_450.RDS")) %>%
+  dplyr::filter(!(.data$cpg %in% great_EPIC$cpg)) %>%
+  dplyr::select("cpg", "GREAT_annotation")
+great_df <- rbind(great_EPIC, great_450) %>%
+  dplyr::distinct() %>%
+  dplyr::group_by(.data$cpg) %>%
+  dplyr::summarise(GREAT_annotation = paste0(.data$GREAT_annotation, collapse = ";"))
+
+meta_df <- meta_df %>%
+  dplyr::left_join(great_df, by = c("probe" = "cpg"))
+```
+
+## Chrommatin Annotation
+
+```{r annotation_chromm}
+reference_df <- data.frame(
+  abbreviation = c(
+    '1_TssA',
+    '2_TssAFlnk',
+    '3_TxFlnk',
+    '4_Tx',
+    '5_TxWk',
+    '6_EnhG',
+    '7_Enh',
+    '8_ZNF/Rpts',
+    '9_Het',
+    '10_TssBiv',
+    '11_BivFlnk',
+    '12_EnhBiv',
+    '13_ReprPC',
+    '14_ReprPCWk',
+    '15_Quies'
+  ),
+  state = c(
+    "Active TSS",
+    "Flanking Active TSS",
+    "Transcr. at gene 5' and 3'",
+    "Strong transcription",
+    "Weak transcription",
+    "Genic enhancers",
+    "Enhancers",
+    "ZNF genes & repeats",
+    "Heterochromatin",
+    "Bivalent/Poised TSS",
+    "Flanking Bivalent TSS/Enh",
+    "Bivalent Enhancer",
+    "Repressed PolyComb",
+    "Weak Repressed PolyComb",
+    "Quiescent/Low"
+  )
+)
+
+chromm_df <- read.table(file.path(reference_dir, "E073_15_coreMarks_mnemonics.bed.gz"), sep = "\t") %>%
+  dplyr::rename(seqnames = "V1", start = "V2", end = "V3", abbreviation = "V4") %>%
+  dplyr::left_join(reference_df, by = c("abbreviation"))
+chromm_df$index <- 1:nrow(chromm_df)
+
+chromm_gr <- GenomicRanges::GRanges(
+  seqnames = chromm_df$seqnames,
+  ranges = IRanges::IRanges(start = chromm_df$start, end = chromm_df$end)
+)
+
+meta_gr <- GenomicRanges::GRanges(
+  seqnames = meta_df$seqnames,
+  ranges = IRanges::IRanges(start = meta_df$start, end = meta_df$end)
+)
+
+overlap_df <- GenomicRanges::findOverlaps(meta_gr, chromm_gr) %>%
+  as.data.frame() %>%
+  dplyr::left_join(
+    chromm_df %>% dplyr::select("index", "state"),
+    by = c("subjectHits" = "index")
+  ) %>%
+  dplyr::group_by(.data$queryHits) %>%
+  dplyr::summarise(state = paste0(.data$state, collapse = ";")) %>%
+  as.data.frame()
+
+meta_df$index <- 1:nrow(meta_df)
+meta_df <- meta_df %>%
+  dplyr::left_join(overlap_df, by = c("index" = "queryHits")) %>%
+  dplyr::select(-c("index"))
+```
+
+## Re-Organize Columns
+
+```{r labels_sort}
+columns <- colnames(meta_df)
+dataset_columns <- c()
+renamed_columns <- c()
+
+for (dataset in datasets) {
+  label <- paste0(".", dataset)
+  target_columns <- columns[stringr::str_ends(columns, label)]
+  new_columns <- paste0(
+    dataset,
+    "_",
+    stringr::str_replace(target_columns, label, "")
+  )
+  
+  dataset_columns <- c(dataset_columns, target_columns)
+  renamed_columns <- c(renamed_columns, new_columns)
+}
+
+general_columns <- columns[!(columns %in% dataset_columns)]
+
+meta_df <- meta_df[,c(general_columns, dataset_columns)]
+colnames(meta_df) <- c(general_columns, renamed_columns)
+```
+
+## Show Significant Results
+
+```{r show_signif}
+meta_df %>%
+  dplyr::filter(.data$fdr_bacon_inclusive < 1e-3)
+```
+
+# Save
+
+```{r save}
+write.csv(
+  meta_df,
+  file = file.path(
+    analysis_dir,
+    "analysis-results",
+    "meta_analysis",
+    "meta_analysis_single_cpg_bacon2.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

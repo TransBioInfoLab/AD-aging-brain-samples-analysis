@@ -1,0 +1,485 @@
+---
+title: "Create a Venn Diagram comparing hyper and hypo methylated DMRs and CpGs in AD vs Aging"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+ref_dir <- file.path(analysis_dir, "code", "Reference_Files")
+result_dir <- file.path(analysis_dir, "analysis-results")
+
+zhang_dir <- file.path(
+  base_dir,
+  "coMethDMR_metaAnalysis/DRAFT_REVISION_NatComm_11-10-2020"
+)
+```
+
+## Load DMR Results
+
+```{r load_dmr}
+aging_dmr_df <- read.csv(
+  file = file.path(
+    analysis_dir,
+    "analysis-results",
+    "meta_analysis",
+    "meta_analysis_summary.csv"
+  )
+) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    chr = "combp_chrom",
+    start = "combp_start",
+    end = "combp_end",
+    estimate = "estimate_bacon",
+    pval = "pvalue_final_bacon",
+    fdr = "fdr_bacon_inclusive",
+    direction = "direction_bacon"
+  ) %>%
+  dplyr::mutate(
+    direction = ifelse(.data$direction == "++", "+", .data$direction),
+    direction = ifelse(.data$direction == "--", "-", .data$direction)
+  )
+
+ad_dmr_df <- readxl::read_excel(
+  file.path(zhang_dir, "41467_2020_19791_MOESM4_ESM_FINAL.xlsx"),
+  sheet = "Supp Data 7",
+  skip = 3
+) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "DMR",
+    "estimate",
+    pval = "pVal.final",
+    "fdr"
+  ) %>%
+  dplyr::mutate(
+    direction = ifelse(.data$estimate > 0, "+", "-")
+  ) %>%
+  tidyr::separate(
+    .data$DMR,
+    into = c("chr", "start", "end"),
+    sep = ":|-",
+    remove = FALSE
+  ) %>%
+  dplyr::mutate(
+    start = as.integer(.data$start),
+    end = as.integer(.data$end)
+  )
+```
+
+## Load CpG Results
+
+```{r load_cpg, warning=FALSE, echo = FALSE}
+fix_dnam_direction <- function(direction) {
+  plus_count <- stringr::str_count(direction, "[+]")
+  neg_count <- stringr::str_count(direction, "[-]")
+  
+  output <- direction
+  output[plus_count >= 2 & neg_count < 2] <- "+"
+  output[plus_count < 2 & neg_count >= 2] <- "-"
+  
+  output
+}
+
+aging_dnam_df <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+) %>%
+  dplyr::filter(.data$fdr_bacon_inclusive < 0.05) %>%
+  dplyr::filter(.data$direction_bacon %in% c("--", "++")) %>%
+  dplyr::select(cpg = "probe", aging_direction = "direction_bacon") %>%
+  dplyr::mutate(
+    aging_direction = ifelse(.data$aging_direction == "++", "+", "-")
+  )
+
+ad_dnam_df <- readxl::read_excel(
+  file.path(zhang_dir, "41467_2020_19791_MOESM4_ESM_FINAL.xlsx"),
+  sheet = "Supp Data 6",
+  skip = 3
+) %>%
+  as.data.frame() %>%
+  dplyr::select(cpg = "CpG", ad_direction = "estimate_direction") %>%
+  dplyr::mutate(
+    ad_direction = fix_dnam_direction(.data$ad_direction)
+  )
+```
+
+# Match Data
+
+## Match DMRs
+
+### Get Overlap
+
+```{r find_overlap_dmr}
+aging_gr <- GenomicRanges::GRanges(
+  seqnames = aging_dmr_df$chr,
+  ranges = IRanges::IRanges(start = aging_dmr_df$start, end = aging_dmr_df$end)
+)
+ad_gr <- GenomicRanges::GRanges(
+  seqnames = ad_dmr_df$chr,
+  ranges = IRanges::IRanges(start = ad_dmr_df$start, end = ad_dmr_df$end)
+)
+
+overlap_df <- GenomicRanges::findOverlaps(aging_gr, ad_gr) %>%
+  as.data.frame()
+
+max(table(overlap_df$queryHits))
+max(table(overlap_df$subjectHits))
+```
+
+### Create Summary Dataframe
+
+```{r summary_dmr}
+aging_dmr_df$index <- 1:nrow(aging_dmr_df)
+ad_dmr_df$index <- 1:nrow(ad_dmr_df)
+
+unique_df <- rbind(
+  aging_dmr_df %>%
+    dplyr::filter(!(.data$index %in% overlap_df$queryHits)) %>%
+    dplyr::select(DMR = "combp_DMR", aging_direction = "direction") %>%
+    dplyr::mutate(ad_direction = "."),
+  ad_dmr_df %>%
+    dplyr::filter(!(.data$index %in% overlap_df$subjectHits)) %>%
+    dplyr::select("DMR", ad_direction = "direction") %>%
+    dplyr::mutate(aging_direction = ".")
+)
+
+match_df <- aging_dmr_df %>%
+  dplyr::select("combp_DMR", aging_direction = "direction", "index") %>%
+  dplyr::inner_join(overlap_df, by = c("index" = "queryHits")) %>%
+  dplyr::select(-"index") %>%
+  dplyr::inner_join(
+    ad_dmr_df %>% dplyr::select("DMR", ad_direction = "direction", "index"),
+    by = c("subjectHits" = "index")
+  ) %>%
+  dplyr::select(-"subjectHits") %>%
+  dplyr::select("DMR", "aging_direction", "ad_direction")
+
+summary_dmr_df <- rbind(unique_df, match_df)
+```
+
+## Match DNAm
+
+```{r summary_dnam}
+summary_dnam_df <- aging_dnam_df %>%
+  dplyr::full_join(ad_dnam_df, by = "cpg") %>%
+  tidyr::replace_na(list(aging_direction = ".", ad_direction = "."))
+```
+
+# Create Venn Diagram
+
+## Make DMR Venn
+
+```{r venn_dmr}
+plot_list <- list(
+  `sig.in.AD (-)` = summary_dmr_df %>% 
+    dplyr::filter(.data$ad_direction == "-") %>% 
+    dplyr::pull("DMR"),
+  `sig.in.AD (+)` = summary_dmr_df %>%
+    dplyr::filter(.data$ad_direction == "+") %>%
+    dplyr::pull("DMR"),
+  `sig.in.aging (+)` = summary_dmr_df %>%
+    dplyr::filter(.data$aging_direction == "+") %>%
+    dplyr::pull("DMR"),
+  `sig.in.aging (-)` = summary_dmr_df %>%
+    dplyr::filter(.data$aging_direction == "-") %>%
+    dplyr::pull("DMR")
+)
+p_dmr <- ggvenn::ggvenn(
+  plot_list,
+  set_name_color = c("#0000BB", "#CCCC00", "#00BB00", "#BB0000"),
+  show_percentage = FALSE
+) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::ggtitle("Significant DMRs") +
+  ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5, size = 20))
+
+p_dmr$layers[[3]]$data$x <- c(-1.1, -1.35, 1.35, 1.1)
+
+p_dmr
+```
+
+## Make DNAm Venn
+
+```{r venn_dnam}
+plot_list <- list(
+  `sig.in.AD (-)` = summary_dnam_df %>% 
+    dplyr::filter(.data$ad_direction == "-") %>% 
+    dplyr::pull("cpg"),
+  `sig.in.AD (+)` = summary_dnam_df %>%
+    dplyr::filter(.data$ad_direction == "+") %>%
+    dplyr::pull("cpg"),
+  `sig.in.aging (+)` = summary_dnam_df %>%
+    dplyr::filter(.data$aging_direction == "+") %>%
+    dplyr::pull("cpg"),
+  `sig.in.aging (-)` = summary_dnam_df %>%
+    dplyr::filter(.data$aging_direction == "-") %>%
+    dplyr::pull("cpg")
+)
+p_dnam <- ggvenn::ggvenn(
+  plot_list,
+  set_name_color = c("#0000BB", "#CCCC00", "#00BB00", "#BB0000"),
+  show_percentage = FALSE
+) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::ggtitle("Significant CpGs") +
+  ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5, size = 20))
+
+p_dnam$layers[[3]]$data$x <- c(-1.1, -1.35, 1.35, 1.1)
+
+p_dnam
+```
+
+## Save Venn Diagram
+
+```{r save}
+pdf(
+  file.path(
+    result_dir, "comparison_aging_and_ad", "comparison-aging-matched-AD-sig.pdf"
+  ),
+  width = 7,
+  height = 6
+)
+p_dnam
+dev.off()
+
+pdf(
+  file.path(
+    result_dir, "comparison_aging_and_ad", "comparison-aging-matched-AD-sig-DMRs.pdf"
+  ),
+  width = 7,
+  height = 6
+)
+p_dmr
+dev.off()
+```
+
+# Get Tables for Overlapping Significant Values
+
+## Reload Data
+
+### DNAm Data
+
+```{r reload_dnam}
+aging_dnam_df <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+) %>%
+  dplyr::filter(.data$direction_bacon %in% c("--", "++")) %>%
+  dplyr::filter(.data$fdr_bacon_inclusive < 0.05) %>%
+  dplyr::select(
+    cpg = "probe",
+    chr = "seqnames",
+    position = "start",
+    estimate_aging = "estimate_bacon",
+    std_err_aging = "standard_error_bacon",
+    pvalue_aging = "pvalue_fixed_bacon",
+    fdr_aging = "fdr_bacon_inclusive",
+    direction_aging = "direction_bacon",
+    "GREAT_annotation",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island",
+    chromatin_state = "state"
+  )
+
+ad_dnam_df <- readxl::read_excel(
+  file.path(zhang_dir, "41467_2020_19791_MOESM4_ESM_FINAL.xlsx"),
+  sheet = "Supp Data 6",
+  skip = 3
+) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    cpg = "CpG",
+    estimate_ad = "estimate",
+    std_err_ad = "se",
+    pvalue_ad = "pVal.final",
+    fdr_ad = "fdr",
+    direction_ad = "estimate_direction"
+  )
+```
+
+### DMR Data
+
+```{r reload_dmr}
+aging_dmr_df <- read.csv(
+  file = file.path(
+    analysis_dir,
+    "analysis-results",
+    "meta_analysis",
+    "meta_analysis_summary.csv"
+  )
+) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    DMR_aging = "combp_DMR",
+    chr_aging = "combp_chrom",
+    start_aging = "combp_start",
+    end_aging = "combp_end",
+    estimate_aging = "estimate_bacon",
+    std_err_aging = "standard_error_bacon",
+    pval_aging = "pvalue_final_bacon",
+    fdr_aging = "fdr_bacon_inclusive",
+    direction_aging = "direction_bacon",
+    "GREAT_annotation",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island",
+    chromatin_state = "state"
+  )
+
+ad_dmr_df <- readxl::read_excel(
+  file.path(zhang_dir, "41467_2020_19791_MOESM4_ESM_FINAL.xlsx"),
+  sheet = "Supp Data 7",
+  skip = 3
+) %>%
+  as.data.frame() %>%
+  dplyr::select(
+    DMR_ad = "DMR",
+    estimate_ad = "estimate",
+    std_err_ad = "se",
+    pval_ad = "pVal.final",
+    fdr_ad = "fdr",
+    direction_ad = "estimate_direction",
+  ) %>%
+  tidyr::separate(
+    .data$DMR_ad,
+    into = c("chr_ad", "start_ad", "end_ad"),
+    sep = ":|-",
+    remove = FALSE
+  ) %>%
+  dplyr::mutate(
+    start_ad = as.integer(.data$start_ad),
+    end_ad = as.integer(.data$end_ad)
+  )
+```
+
+## Merge Tables
+
+### Merge DNAm
+
+```{r merge_signif_dnam}
+dnam_df <- aging_dnam_df %>%
+  dplyr::inner_join(ad_dnam_df, by = "cpg") %>%
+  dplyr::select(
+    "cpg",
+    "estimate_aging",
+    "std_err_aging",
+    "pvalue_aging",
+    "fdr_aging",
+    "direction_aging",
+    "estimate_ad",
+    "std_err_ad",
+    "pvalue_ad",
+    "fdr_ad",
+    "direction_ad",
+    "chr",
+    "position",
+    "GREAT_annotation",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island",
+    "chromatin_state"
+  )
+```
+
+### Merge DMR
+
+```{r merge_signif_dmr}
+aging_gr <- GenomicRanges::GRanges(
+  seqnames = aging_dmr_df$chr_aging,
+  ranges = IRanges::IRanges(start = aging_dmr_df$start_aging, end = aging_dmr_df$end_aging)
+)
+ad_gr <- GenomicRanges::GRanges(
+  seqnames = ad_dmr_df$chr_ad,
+  ranges = IRanges::IRanges(start = ad_dmr_df$start_ad, end = ad_dmr_df$end_ad)
+)
+
+overlap_df <- GenomicRanges::findOverlaps(aging_gr, ad_gr) %>%
+  as.data.frame()
+
+dmr_df <- cbind(
+  aging_dmr_df[overlap_df$queryHits,],
+  ad_dmr_df[overlap_df$subjectHits,]
+) %>%
+  dplyr::select(
+    "DMR_aging",
+    "DMR_ad",
+    "estimate_aging",
+    "std_err_aging",
+    "pval_aging",
+    "fdr_aging",
+    "direction_aging",
+    "estimate_ad",
+    "std_err_ad",
+    "pval_ad",
+    "fdr_ad",
+    "direction_ad",
+    "GREAT_annotation",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island",
+    "chromatin_state"
+  )
+```
+
+## Save Data
+
+```{r merge_save}
+write.csv(
+  dnam_df,
+  file = file.path(
+    result_dir, "comparison_aging_and_ad", "Aging_and_Matched_AD_Significant_CpGs.csv"
+  )
+)
+write.csv(
+  dmr_df,
+  file = file.path(
+    result_dir, "comparison_aging_and_ad", "Aging_and_Matched_AD_Significant_DMRs.csv"
+  )
+)
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

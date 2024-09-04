@@ -1,0 +1,209 @@
+---
+title: "Recalculate ROSMAP data DNAm residuals"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(stats)
+  library(minfi)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(SummarizedExperiment)
+
+  library(parallel)
+  library(doParallel)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+code_dir <- file.path(analysis_dir, "code")
+dataset_dir <- file.path(code_dir, "DATASETS")
+rosmap_dir <- file.path(dataset_dir, "Rosmap")
+reference_dir <- file.path(code_dir, "Reference_Files")
+rna_dir <- file.path(base_dir, "coMethDMR_metaAnalysis/DNAm_RNA/data")
+```
+
+# Get Residuals
+
+## Define Functions
+
+```{r association_functions}
+start_parallel <- function(parallel, cores) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    if (Sys.info()["sysname"] == "Windows"){
+      cluster <- parallel::makeCluster(cores)
+      doParallel::registerDoParallel(cluster)
+    } else {
+      doParallel::registerDoParallel(cores)
+    }
+  } else {
+    parallel = FALSE
+  }
+
+  parallel
+}
+
+stop_parallel <- function(parallel) {
+  if (parallel &&
+      requireNamespace("doParallel", quietly = TRUE) &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    doParallel::stopImplicitCluster()
+  }
+
+  TRUE
+}
+
+get_lm_resid <- function(M_mat, pheno_df, fo) {
+  parallel <- TRUE
+  parallel <- start_parallel(parallel, cores = 8)
+  
+  formula <- stats::as.formula(fo)
+  
+  resid <- plyr::adply(
+    M_mat,
+    .margins = 1,
+    .fun = function(m_value) {
+      
+    data <- data.frame(m_value = m_value, pheno_df)
+    lm_mod <- stats::lm(
+      formula,
+      data = data
+    )
+    
+    residuals(lm_mod)
+    },
+    .progress = "time",
+    .parallel = parallel
+  )
+  
+  stop_parallel(parallel)
+  
+  row.names(resid) <- resid[,1]
+  resid[,1] <- NULL
+  colnames(resid) <- colnames(M_mat)
+  
+  resid
+}
+
+create_se <- function(dnam_df, pheno_df, dnam_data) {
+  row_df <- SummarizedExperiment::rowData(dnam_data) %>%
+    as.data.frame()
+  row.names(pheno_df) <- colnames(dnam_df)
+  
+  dnam_se <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(dnam = dnam_df),
+    colData = pheno_df,
+    rowData = row_df
+  )
+  
+  dnam_se
+}
+
+calculate_residuals <- function(dnam_data, probes) {
+  dnam_data <- dnam_data[row.names(dnam_data) %in% probes,]
+  M_mat <- minfi::logit2(SummarizedExperiment::assays(dnam_data)$DNAm)
+  pheno_df <- SummarizedExperiment::colData(dnam_data) %>%
+    data.frame() %>%
+    dplyr::mutate(
+      age_death = as.numeric(.data$age_death),
+      sex = as.factor(.data$sex),
+      NeuN_pos = as.numeric(.data$NeuN_pos),
+      batch = as.factor(.data$batch),
+      Sample_Plate = as.factor(.data$Sample_Plate),
+      braaksc = as.numeric(.data$braaksc)
+    )
+  
+  fo <-  "m_value ~ sex + NeuN_pos + batch + Sample_Plate + age_death"
+  dnam_df <- get_lm_resid(M_mat, pheno_df, fo)
+  
+  create_se(dnam_df, pheno_df, dnam_data)
+}
+```
+
+## Get Significant Probes
+
+```{r load_probes}
+cpg_ref <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+) %>%
+  dplyr::filter(.data$fdr_bacon_inclusive < 0.05) %>%
+  dplyr::filter(.data$direction_bacon %in% c("--", "++"))
+
+probes <- cpg_ref$probe
+```
+
+## Load Data
+
+```{r load_dnam}
+dnam_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_data.RDS")
+)
+
+dnam_norm_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_normal.RDS")
+)
+
+dnam_ad_data <- readRDS(
+  file = file.path(rosmap_dir, "rna_dnam", "dnam_processed_ad.RDS")
+)
+```
+
+## Re-Calculate Residuals
+
+We need to adjust for age of death here, so we need to recalculate the residuals
+
+```{r residual}
+dnam_se <- calculate_residuals(dnam_data, probes)
+dnam_norm_se <- calculate_residuals(dnam_norm_data, probes)
+dnam_ad_se <- calculate_residuals(dnam_ad_data, probes)
+```
+
+# Save Results
+
+```{r save}
+saveRDS(dnam_se, file = file.path(rosmap_dir, "rna_dnam", "dnam_data.RDS"))
+saveRDS(dnam_norm_se, file = file.path(rosmap_dir, "rna_dnam", "dnam_normal_data.RDS"))
+saveRDS(dnam_ad_se, file = file.path(rosmap_dir, "rna_dnam", "dnam_ad_data.RDS"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+

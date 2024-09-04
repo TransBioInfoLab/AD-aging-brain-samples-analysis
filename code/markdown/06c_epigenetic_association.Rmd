@@ -1,0 +1,191 @@
+---
+title: "Find association between significant, Aging-associated CpGs or DMRs and epigenetic clocks"
+subtitle: "Read and pre-filter ROSMAP data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+reference_dir <- file.path(code_dir, "Reference_Files")
+result_dir <- file.path(analysis_dir, "analysis-results")
+```
+
+## Load Data
+
+```{r load}
+dmr_df <- read.csv(
+  file = file.path(
+    analysis_dir,
+    "analysis-results",
+    "meta_analysis",
+    "meta_analysis_summary.csv"
+  )
+) %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    dmr_estimate = "estimate_bacon",
+    dmr_std_err = "standard_error_bacon",
+    dmr_pvalue = "pvalue_final_bacon",
+    dmr_direction = "direction_bacon",
+    dmr_fdr = "fdr_bacon",
+    cpg = "combp_probes"
+  ) %>%
+  dplyr::mutate(
+    cpg = stringr::str_split(.data$cpg, ";")
+  ) %>%
+  tidyr::unnest(.data$cpg) %>%
+  dplyr::mutate(dmr_direction = ifelse(.data$dmr_direction == "--", "-", "+"))
+
+cpg_df <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+)
+
+dnam_df <- cpg_df %>%
+  dplyr::filter(.data$fdr_bacon_inclusive < 0.05) %>%
+  dplyr::filter(.data$direction_bacon %in% c("--", "++")) %>%
+  dplyr::select(
+    cpg = "probe",
+    dnam_estimate = "estimate_bacon",
+    dnam_std_err = "standard_error_bacon",
+    dnam_pvalue = "pvalue_final_bacon",
+    dnam_direction = "direction_bacon",
+    dnam_fdr = "fdr_bacon_inclusive"
+  ) %>%
+  dplyr::mutate(dnam_direction = ifelse(.data$dnam_direction == "--", "-", "+"))
+
+cpg_df <- cpg_df %>%
+  dplyr::select(
+    cpg = "probe",
+    chr = "seqnames",
+    position = "start",
+    "Relation_to_Island",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "GREAT_annotation",
+    chromatin_state = "state"
+  ) %>%
+  dplyr::distinct()
+
+pmid_df <- readxl::read_excel(file.path(reference_dir, "Epigenetic_Legends.xlsx")) %>%
+  as.data.frame() %>%
+  dplyr::select(Family = "Label", "PMID")
+epi_df <- readRDS(file = file.path(reference_dir, "Epigenetic_Clocks.RDS")) %>%
+  dplyr::mutate(
+    direction = ifelse(.data$Coefficient > 0, "+", "-")
+  ) %>%
+  dplyr::left_join(pmid_df, by = "Family") %>%
+  dplyr::select("cpg", epigenetic_family = "Family", "PMID", epigenetic_direction = "direction")
+```
+
+# Match Data
+
+```{r get_match}
+dmr_epi_df <- dmr_df %>%
+  dplyr::inner_join(epi_df, by = "cpg") %>%
+  dplyr::left_join(cpg_df, by = "cpg") %>%
+  dplyr::filter(.data$dmr_direction == .data$epigenetic_direction)
+
+dnam_epi_df <- dnam_df %>%
+  dplyr::inner_join(epi_df, by = "cpg") %>%
+  dplyr::left_join(cpg_df, by = "cpg") %>%
+  dplyr::filter(.data$dnam_direction == .data$epigenetic_direction)
+```
+
+# Get DMR CpGs
+
+```{r}
+dmr_cpg_df <- dmr_df %>%
+  dplyr::select(
+    "DMR",
+    "combp_DMR",
+    "cpg",
+    estimate = "dmr_estimate",
+    pvalue = "dmr_pvalue",
+    fdr = "dmr_fdr",
+    direction = "dmr_direction"
+  ) %>%
+  dplyr::left_join(cpg_df, by = "cpg")
+```
+
+
+# Save Results
+
+```{r save}
+write.csv(
+  dnam_epi_df,
+  file = file.path(
+    result_dir,
+    "comparison_aging_and_ad",
+    "Aging_and_Epigenetic_Significant_CpGs.csv"
+  ),
+  row.names = FALSE
+)
+write.csv(
+  dmr_epi_df,
+  file = file.path(
+    result_dir,
+    "comparison_aging_and_ad", 
+    "Aging_and_Epigenetic_Significant_DMRs.csv"
+  ),
+  row.names = FALSE
+)
+write.csv(
+  dmr_cpg_df,
+  file = file.path(result_dir, "annotations", "DMR_CpG_Annotations.csv"),
+  row.names = FALSE
+)
+dmr_cpg_df %>%
+  dplyr::arrange(.data$cpg) %>%
+  dplyr::select("cpg") %>%
+  dplyr::distinct() %>%
+  write.csv(
+    file.path(result_dir, "annotations", "DMR_CpG_List.csv"),
+    row.names = FALSE
+  )
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>
+

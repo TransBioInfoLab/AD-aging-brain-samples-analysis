@@ -1,0 +1,382 @@
+---
+title: "Read in ROSMAP DNA methylation data, and pre-filter to overlap with RNAseq Data"
+subtitle: "Read and pre-filter ROSMAP data"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+  library(doParallel)
+  if (Sys.info()["sysname"] == "Windows") {
+    library(parallel)
+  }
+  
+  library(stringr)
+  library(plyr)
+  library(stats)
+  library(TCGAbiolinks)
+  
+  source("../R/CorticalClock.r", local=TRUE)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+code_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis/code")
+dataset_dir <- file.path(code_dir, "DATASETS", "Rosmap")
+download_dir <- file.path(dataset_dir, "01_download")
+idat_dir <- file.path(dataset_dir, "02_idat_data")
+compile_dir <- file.path(dataset_dir, "03_sample_data")
+reference_dir <- file.path(code_dir, "Reference_Files")
+rna_dir <- file.path(base_dir, "coMethDMR_metaAnalysis/DNAm_RNA/data")
+```
+
+# Get Phenotypes
+
+We first get the phenotypes and load to target samples that have both DNAm and RNA data
+
+## Read Phenotype Files
+
+```{r read_pheno_files}
+# read phenotype files
+df_1 <- read.csv(file.path(
+  reference_dir, "ROSMAP_clinical_4-8-2024.csv"
+)) %>%
+  dplyr::select(
+    "projid",
+    "Study",
+    "msex",
+    "educ",
+    "race",
+    "spanish",
+    "apoe_genotype",
+    "age_at_visit_max",
+    "age_first_ad_dx",
+    "age_death",
+    "cts_mmse30_first_ad_dx",
+    "cts_mmse30_lv",
+    "pmi",
+    "braaksc",
+    "ceradsc",
+    "cogdx"
+  ) %>%
+  dplyr::distinct()
+df_2 <- read.table(file.path(
+  reference_dir, "ROSMAP_arrayMethylation_covariates.tsv"
+), header = TRUE) %>%
+  dplyr::select(
+    "Sample",
+    "Sentrix_ID",
+    "Sentrix_Position",
+    "Sample_Plate",
+    "Sample_Well",
+    "Sample_Group",
+    "batch"
+  ) %>%
+  dplyr::distinct()
+df_3 <- read.csv(file.path(
+  reference_dir, "ROSMAP_IDkey.csv"
+)) %>%
+  dplyr::select(Sample = "mwas_id", "projid", "rnaseq_id") %>%
+  dplyr::distinct()
+```
+
+## Get List of Existing DNAm Samples
+
+```{r get_pheno_dnam}
+df_idat <- list.files(
+  idat_dir,
+  pattern = "*_Grn.idat",
+  all.files = FALSE,
+  full.names = FALSE,
+  recursive = TRUE
+) %>%
+  stringr::str_split_fixed(pattern = "_", n=3) %>%
+  data.frame() %>%
+  dplyr::select(sentrix_id = "X1", slide = "X2") %>%
+  dplyr::mutate(sentrix_id = gsub("^.*/", "", .data$sentrix_id)) %>%
+  dplyr::mutate(label = paste0(.data$sentrix_id, "_", .data$slide))
+```
+
+## Get List of Existing RNAseq Samples
+
+```{r get_pheno_rna}
+fix_label <- function(label) {
+  label_df <- label %>%
+    stringr::str_replace("X", "") %>%
+    stringr::str_split("_") %>%
+    data.frame() %>%
+    t()
+  
+  paste0(label_df[,1], "_", label_df[,2])
+}
+
+set_1_df <- read.table(
+  file = file.path(rna_dir, "ROSMAP_RNAseq_FPKM_gene_plates_1_to_6_normalized.tsv"),
+  sep = "\t",
+  header = TRUE,
+  row.names = 1
+)[,-1]
+
+set_2_df <- read.table(
+  file = file.path(rna_dir, "ROSMAP_RNAseq_FPKM_gene_plates_7_to_8_normalized.tsv"),
+  sep = "\t",
+  header = TRUE,
+  row.names = 1
+)[,-1]
+
+rna_df <- cbind(set_1_df, set_2_df)
+genelist <- as.character(row.names(rna_df))
+genelist <- stringr::str_split_i(genelist, "[.]", i = 1)
+row.names(rna_df) <- genelist
+
+pheno_rna_df <- data.frame(
+  rna_label = colnames(rna_df)
+) %>%
+  dplyr::mutate(
+    rnaseq_id = fix_label(.data$rna_label)
+  )
+pheno_rna_df$gene_plate <- ifelse(pheno_rna_df$rna_label %in% colnames(set_1_df), "1-6", "7-8")
+```
+
+## Add RNAseq Markers
+
+```{r rnaseq_markers}
+gene_info_df <- TCGAbiolinks::get.GRCh.bioMart("hg19")
+genes_ls <- c("ENO2", "OLIG2", "CD34", "CD68", "GFAP")
+gene_info_df <- gene_info_df %>%
+  dplyr::filter(.data$external_gene_name %in% genes_ls) %>%
+  dplyr::filter(.data$ensembl_gene_id %in% row.names(rna_df))
+
+for (index in 1:nrow(gene_info_df)) {
+  gene <- gene_info_df$external_gene_name[[index]]
+  ens <- gene_info_df$ensembl_gene_id[[index]]
+  
+  pheno_rna_df[,paste0("markers_", gene)] <- log2(1+as.numeric(rna_df[ens,]))
+}
+```
+
+## Merge Phenotype Files
+
+```{r merge_pheno}
+# merge files
+pheno_df <- df_1 %>%
+  dplyr::inner_join(df_3, by = "projid") %>%
+  dplyr::inner_join(df_2, by = "Sample") %>%
+  dplyr::inner_join(pheno_rna_df, by = "rnaseq_id")
+
+# filter by idat existence
+pheno_df <- pheno_df %>%
+  dplyr::filter(paste0(.data$Sentrix_ID, "_", .data$Sentrix_Position) %in% df_idat$label)
+
+# filter by race and braak existence
+pheno_df <- pheno_df %>%
+  dplyr::filter(!is.na(.data$braaksc)) %>%
+  dplyr::filter(.data$race == 1) %>%
+  dplyr::filter(.data$spanish != 1)
+```
+
+## Adjust Phenotype Columns
+
+```{r sort_pheno}
+pheno_df <- pheno_df %>%
+  dplyr::mutate(braaksc = as.integer(as.numeric(.data$braaksc))) %>%
+  dplyr::mutate(stage3 = ifelse(
+    .data$braaksc < 3, "0-2",
+    ifelse(.data$braaksc < 5, "3-4", "5-6")
+  )) %>%
+  dplyr::mutate(Sentrix = paste0(.data$Sentrix_ID, "_", .data$Sentrix_Position)) %>%
+  dplyr::mutate(Slide = .data$Sentrix_ID) %>%
+  dplyr::mutate(sex = ifelse(.data$msex == 1, "MALE", "FEMALE")) %>%
+  dplyr::mutate(
+    age_death = ifelse(
+      is.na(.data$age_death),
+      .data$age_at_visit_max,
+      .data$age_death
+    )
+  ) %>%
+  dplyr::mutate(
+    age_death = as.numeric(ifelse(.data$age_death == "90+", "90", .data$age_death))
+  ) %>%
+  dplyr::mutate(msex = ifelse(.data$msex == 1, "MALE", "FEMALE")) %>%
+  dplyr::mutate(ceradsc = as.integer(.data$ceradsc)) %>%
+  dplyr::select(
+    "Sample",
+    "rnaseq_id",
+    "Sentrix_ID",
+    "rna_label",
+    "Sentrix_Position",
+    "Sample_Plate",
+    "Sample_Well",
+    "Sample_Group",
+    "batch",
+    "gene_plate",
+    "Sentrix",
+    "Slide", 
+    "projid", 
+    "Study", 
+    "msex",
+    "educ", 
+    "race",
+    "spanish",
+    "apoe_genotype",
+    "age_at_visit_max",
+    "age_first_ad_dx",
+    "age_death",
+    "cts_mmse30_first_ad_dx",
+    "cts_mmse30_lv",
+    "pmi",
+    "braaksc",
+    "ceradsc",
+    "cogdx",
+    "stage3",
+    "sex",
+    "markers_ENO2",
+    "markers_OLIG2",
+    "markers_CD34",
+    "markers_CD68",
+    "markers_GFAP"
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(Sentrix_ID = as.character(.data$Sentrix_ID))
+```
+
+## Adjust labels
+
+R doesn't handle column names with *-* in them well, so they are converted to *_* to sample identities
+
+```{r adjust_pheno_labels}
+pheno_df <- pheno_df %>%
+  dplyr::mutate(
+    Sample = stringr::str_replace_all(.data$Sample, "[-]", "_"),
+    rnaseq_id = stringr::str_replace_all(.data$rnaseq_id, "[-]", "_"),
+    rna_label = stringr::str_replace_all(.data$rna_label, "[-]", "_")
+  )
+```
+
+# Sanity Check Phenotype
+
+We need to check that the phenotypes don't have issues
+
+## Check Gene Plates
+
+```{r check_plate}
+table(pheno_df$gene_plate)
+```
+
+There are only 2 samples in plate 7-8, so we filter those out
+
+```{r filter_plate}
+pheno_df <- pheno_df %>%
+  dplyr::filter(.data$gene_plate == "1-6")
+```
+
+## Filter by Age and PMI
+
+```{r check_na}
+sum(is.na(pheno_df$age_death))
+sum(is.na(pheno_df$pmi))
+```
+
+There are 2 samples with missing age or pmi information (both are missing pmi), so we remove those
+
+```{r filter_na}
+pheno_df <- pheno_df %>%
+  dplyr::filter(!is.na(.data$age_death)) %>%
+  dplyr::filter(!is.na(.data$pmi))
+```
+
+```{r check_age_pmi}
+min(pheno_df$age_death)
+max(pheno_df$pmi)
+```
+
+All samples are age > 65, and pmi < 72 hours, so we don't need to filter on that
+
+## Filter by repeated ids
+
+```{r check_rna_id}
+counts <- table(pheno_df$rnaseq_id)
+counts[counts > 1]
+```
+
+There is one sample that was sequenced twice. We only take 1 of the sequencings, instead of double counting it
+
+```{r filter_rna_id}
+dim(pheno_df)
+pheno_df <- pheno_df %>%
+  dplyr::group_by(.data$rnaseq_id) %>%
+  dplyr::arrange(.data$rna_label) %>%
+  dplyr::filter(dplyr::row_number()==1)
+dim(pheno_df)
+```
+
+# Get DNAm Data
+
+## Read in idat Data
+
+```{r read_idat}
+# read idat data
+assay_data <- minfi::read.metharray.exp(
+  base = idat_dir,
+  recursive = TRUE,
+  verbose = FALSE,
+  force = TRUE
+)
+```
+
+## Filter to Matching Phenotype Data
+
+```{r filter_idat}
+assay_data <- assay_data[,pheno_df$Sentrix]
+colnames(assay_data) <- pheno_df$Sample
+```
+
+# Save
+
+## Convert to Summarized Experiment object
+
+```{r create_se}
+dnam_se <- SummarizedExperiment::SummarizedExperiment(
+  list(DNAm = assay_data),
+  colData = pheno_df
+)
+```
+
+## Save
+
+```{r save}
+saveRDS(dnam_se, file.path(dataset_dir, "rna_dnam", "dnam_full_data.RDS"))
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
