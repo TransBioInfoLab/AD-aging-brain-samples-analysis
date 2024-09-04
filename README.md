@@ -16,7 +16,7 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/01b_preprocess_BDR_data.Rmd        |   BDR  | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/01b_preprocess_BDR_data.Rmd) |
 | code/markdown/01b_preprocess_Rosmap_data.Rmd         |   Rosmap  | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/01b_preprocess_Rosmap_data.Rmd) |
 
-### 2. Single cohort and Meta-analysis
+### 2. Single cohort and meta-analysis
 
 | File                 | Link |
 |----------------------|-------------|
@@ -35,7 +35,7 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/03e_enrichment_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03e_pathway_analysis.Rmd ) |
 | code/markdown/03f_enrichment_analysis_figures.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/03f_pathway_analysis_figures.Rmd) |
 
-### 4. Correlation of Aging-associated CpGs and DMRs methylation levels in blood and brain samples  
+### 4. Correlation of aging-associated CpGs and DMRs methylation levels in blood and brain samples  
 
 | File                 | Link |
 |----------------------|-------------|
@@ -53,7 +53,7 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/05f_associate_RNA_to_DNAm.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05f_associate_RNA_to_DNAm.Rmd) |
 | code/markdown/05g_sensitivity_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05g_evaluate_association_consistency.Rmd) |
 
-### 6. Creating Figures
+### 6. Creating figures
 
 | File                 | Link |
 |----------------------|-------------|
