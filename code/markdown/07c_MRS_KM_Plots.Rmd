@@ -194,10 +194,10 @@ dev.off()
 ## Show Plots
 
 ```{r display}
-print(km1, newpage = FALSE)
-print(km2, newpage = FALSE)
-print(km3, newpage = FALSE)
-print(km4, newpage = FALSE)
+print(km1)
+print(km2)
+print(km3)
+print(km4)
 ```
 
 # Create Adjusted KM Plots
@@ -221,6 +221,11 @@ get_adjusted_cpg_plot <- function(adni_pheno, adni_beta, cpg) {
     data = pred_df
   )
   
+  # pval <- summary(cox_model_filtered)$logtest[["pvalue"]]
+  pval <- summary(cox_model_filtered)$coefficients["groupHigh methylation","Pr(>|z|)"]
+  pval <- formatC(pval, format = "e", digits = 2)
+  label <- paste0("P = ", pval)
+  
   survminer::ggadjustedcurves(
     fit = cox_model_filtered,  
     variable = "group",
@@ -233,9 +238,14 @@ get_adjusted_cpg_plot <- function(adni_pheno, adni_beta, cpg) {
     ylab = "Survival Probability", 
     title = title
   ) +
-    ggplot2::ylim(0.2, 1) +
-    ggplot2::xlim(0, 10)
-    # ggplot2::coord_cartesian(ylim = c(0.2, 1.05), expand = TRUE) 
+    ggplot2::coord_cartesian(ylim = c(0.3, 1.05), xlim = c(0, 10.1), expand = FALSE) +
+    ggplot2::annotate("text", x = 1, y = 0.4, label = label, size = 4.5) +
+    ggplot2::guides(
+      col = ggplot2::guide_legend(ncol = 2, title = "")
+    ) +
+    ggplot2::theme(
+      legend.position = c(.65,.9),
+      legend.text = ggplot2::element_text(size = 16))
 }
 ```
 
@@ -249,15 +259,12 @@ km4 <- get_adjusted_cpg_plot(adni_pheno, adni_beta, "cg01748892")
 
 pdf(
   file.path(plot_dir, "BDR_Braaks_Supplementary_Plots.pdf"),
-  width = 9,
-  height = 9,
+  width = 18,
+  height = 18,
   onefile = TRUE
 )
 
-print(km1, newpage = FALSE)
-print(km2)
-print(km3)
-print(km4)
+gridExtra::grid.arrange(km1, km2, km3, km4, ncol = 2, nrow = 2, newpage = FALSE)
 
 dev.off()
 ```
@@ -265,10 +272,10 @@ dev.off()
 ## Show Plots
 
 ```{r display_adjusted}
-print(km1, newpage = FALSE)
-print(km2, newpage = FALSE)
-print(km3, newpage = FALSE)
-print(km4, newpage = FALSE)
+print(km1)
+print(km2)
+print(km3)
+print(km4)
 ```
 
 ## Define Functions
