@@ -53,7 +53,13 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/05f_associate_RNA_to_DNAm.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05f_associate_RNA_to_DNAm.Rmd) |
 | code/markdown/05g_sensitivity_analysis.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/05g_evaluate_association_consistency.Rmd) |
 
-### 6. Creating figures
+### 6. Validation against external datasets
+| File                 | Link |
+|----------------------|-------------|
+| code/markdown/07a_check_against_miamiad_ad.Rmd       |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/07a_check_against_miamiad_ad.Rmd) |
+| code/markdown/07b_annotate_cox_markers.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/07b_annotate_cox_markers.Rmd) |
+
+### 7. Creating figures
 
 | File                 | Link |
 |----------------------|-------------|
@@ -62,3 +68,5 @@ Aging is a major risk factor for Alzheimer’s disease (AD), but the molecular p
 | code/markdown/06c_epigenetic_association.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/06c_epigenetic_association.Rmd) |
 | code/markdown/06d_check_against_miamiad.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/06d_check_against_miamiad.Rmd) |
 | code/markdown/06e_get_matched_samples.Rmd      |  [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/06e_get_matched_samples.Rmd) |
+| code/markdown/07c_MRS_KM_Plots.Rmd               | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/07c_MRS_KM_Plots.Rmd) |
+| code/markdown/07d_MRS_Residual_Plots.Rmd               | [Link to the script](https://github.com/TransBioInfoLab/AD-aging-brain-samples-analysis/blob/main/code/markdown/07d_MRS_Residual_Plots.Rmd) |
