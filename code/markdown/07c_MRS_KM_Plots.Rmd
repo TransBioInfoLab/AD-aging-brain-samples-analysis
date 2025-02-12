@@ -1,0 +1,283 @@
+---
+title: "KM plots of aging-associated CpGs in external cohort (ADNI)"
+author:
+   - David lukacsovich^[University of Miami]
+   - Lily Wang^[University of Miami]
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: true
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+# Set Up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(survival)
+  library(dplyr)
+  library(SummarizedExperiment)
+  library(ggplot2)
+  library(survminer)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+adni_dir <- file.path(base_dir, "DATASET", "ADNI", "DNAm")
+plot_dir <- file.path(analysis_dir, "analysis-results", "plots")
+```
+
+# Get Data
+
+```{r load}
+adni_se <- readRDS(
+  file.path(adni_dir, "pca_filtering/all_sample/ADNI_all_sample_cn_mci_baseline_surv.rds")
+)
+
+adni_pheno <- adni_se %>%
+  SummarizedExperiment::colData() %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    status = ifelse(
+      (.data$DX == "CN" & .data$DX2 %in% c("MCI", "Dementia")) |
+        (.data$DX == "MCI" & .data$DX2 %in% c("Dementia")),
+      1,
+      0
+    )
+  ) %>%
+  dplyr::filter(.data$SurvDays > 0)
+
+adni_beta <- SummarizedExperiment::assay(adni_se)[,adni_pheno$barcodes]
+```
+
+# Create KM Plot
+
+## Define Functions
+
+```{r functions}
+get_plot_data <- function(pheno_df, assay_data, probe) {
+  pheno_df <- pheno_df
+  pheno_df$cpg <- as.numeric(assay_data[probe,])
+  
+  plot_df <- pheno_df %>%
+    dplyr::mutate(
+      SurvDays = ifelse(.data$SurvDays > 3650, 3650, .data$SurvDays)
+    ) %>%
+    dplyr::mutate(
+      status = ifelse(.data$SurvDays >= 3650 & .data$status == 1, 0, .data$status)
+    ) %>%
+    dplyr::mutate(
+      SurvYears = .data$SurvDays / 365.
+    ) %>%
+    dplyr::mutate(
+      group = cut(
+        .data$cpg,
+        breaks = quantile(.data$cpg, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+        labels = c("Low methylation", "Medium methylation", "High methylation"),
+        include.lowest = TRUE
+      )
+    ) %>%
+    dplyr::filter(.data$group %in% c("Low methylation", "High methylation"))
+  
+  plot_df
+}
+
+get_signif <- function(pred_df) {
+  pval <- survival::survdiff(
+    survival::Surv(SurvYears, status) ~ group,
+    data = pred_df
+  )$pvalue %>%
+    formatC(format = "e", digits = 2)
+}
+
+plot_km <- function(pred_df, title, pvalue) {
+  finalfit::surv_plot(
+    pred_df,
+    "survival::Surv(SurvYears, status)",
+    "group",
+    xlab = "Time (yearss)",
+    ylab = "Survival rate (%)",
+    legend.labs = c("Low methylation", "High methylation"),
+    y.text = FALSE,
+    censor = TRUE, 
+    linetype = c("solid"), 
+    title = title,
+    pval = paste0("p = ", pvalue),
+    fontsize = 6,
+    font.tickslab = c(size = 20),
+    font.main = c(size = 20),
+    font.x = c(size = 20),
+    font.y = c(size = 20),
+    font.legend = c(size = 20),
+    surv.scale = c("percent"),
+    stats_label = c("high", "low"),
+    tables.y.text = FALSE,
+    tables.height = 0.10
+  )
+}
+
+adjust_km_plot <- function(km_plot) {
+  km_plot$plot <- km_plot$plot + 
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 20, hjust = 0.5)
+    )
+  
+  km_plot$table <- km_plot$table + 
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 18),
+      axis.text = ggplot2::element_text(size = 18),
+      text = ggplot2::element_text(size = 16)
+    )
+  
+  km_plot
+}
+
+get_cpg_plot <- function(adni_pheno, adni_beta, cpg) {
+  title <- paste0("KM Plot for low vs. high CpG methylation at ", cpg)
+  pred_df <- get_plot_data(adni_pheno, adni_beta, cpg)
+  pvalue <- get_signif(pred_df)
+  km_plot <- plot_km(pred_df, title, pvalue) %>%
+    adjust_km_plot()
+  km_plot
+}
+```
+
+## Create Plots
+
+```{r plot}
+km1 <- get_cpg_plot(adni_pheno, adni_beta, "cg10752406")
+km2 <- get_cpg_plot(adni_pheno, adni_beta, "cg19990651")
+km3 <- get_cpg_plot(adni_pheno, adni_beta, "cg25045942")
+km4 <- get_cpg_plot(adni_pheno, adni_beta, "cg01748892")
+
+pdf(
+  file.path(plot_dir, "BDR_Braaks_Plots.pdf"),
+  width = 15,
+  height = 12,
+  onefile = TRUE
+)
+
+print(km1, newpage = FALSE)
+print(km2)
+print(km3)
+print(km4)
+
+dev.off()
+
+pdf(
+  file.path(plot_dir, "Figure 4.pdf"),
+  width = 15,
+  height = 12,
+  onefile = TRUE
+)
+
+print(km1, newpage = FALSE)
+
+dev.off()
+```
+
+## Show Plots
+
+```{r display}
+print(km1, newpage = FALSE)
+print(km2, newpage = FALSE)
+print(km3, newpage = FALSE)
+print(km4, newpage = FALSE)
+```
+
+# Create Adjusted KM Plots
+
+## Define Functions
+
+```{r functions_adjust}
+get_adjusted_cpg_plot <- function(adni_pheno, adni_beta, cpg) {
+  title <- paste0("Adjusted KM Plot for low vs. high CpG methylation at ", cpg)
+  pred_df <- get_plot_data(adni_pheno, adni_beta, cpg)
+  
+  fo <- as.formula(
+    paste0(
+      "survival::Surv(SurvYears, status) ~ ",
+      "group + age_at_visit + PTGENDER + APOE4 + MMSE_bl + PTEDUCAT"
+    )
+  )
+  
+  cox_model_filtered <- survival::coxph(
+    fo,
+    data = pred_df
+  )
+  
+  survminer::ggadjustedcurves(
+    fit = cox_model_filtered,  
+    variable = "group",
+    data = pred_df, 
+    palette = c("#00468BFF", "#ED0000FF"),
+    pval = TRUE,         # has no effect
+    conf.int = TRUE,     # has no effect
+    risk.table = TRUE,   # has no effect
+    xlab = "Time (Years)",
+    ylab = "Survival Probability", 
+    title = title
+  ) +
+    ggplot2::ylim(0.2, 1) +
+    ggplot2::xlim(0, 10)
+    # ggplot2::coord_cartesian(ylim = c(0.2, 1.05), expand = TRUE) 
+}
+```
+
+## Create Plots
+
+```{r plot_adjusted}
+km1 <- get_adjusted_cpg_plot(adni_pheno, adni_beta, "cg10752406")
+km2 <- get_adjusted_cpg_plot(adni_pheno, adni_beta, "cg19990651")
+km3 <- get_adjusted_cpg_plot(adni_pheno, adni_beta, "cg25045942")
+km4 <- get_adjusted_cpg_plot(adni_pheno, adni_beta, "cg01748892")
+
+pdf(
+  file.path(plot_dir, "BDR_Braaks_Supplementary_Plots.pdf"),
+  width = 9,
+  height = 9,
+  onefile = TRUE
+)
+
+print(km1, newpage = FALSE)
+print(km2)
+print(km3)
+print(km4)
+
+dev.off()
+```
+
+## Show Plots
+
+```{r display_adjusted}
+print(km1, newpage = FALSE)
+print(km2, newpage = FALSE)
+print(km3, newpage = FALSE)
+print(km4, newpage = FALSE)
+```
+
+## Define Functions
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>

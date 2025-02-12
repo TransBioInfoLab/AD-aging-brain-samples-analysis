@@ -1,0 +1,159 @@
+---
+title: "Check DMR and CpGs data against MIAMI-AD"
+subtitle: "Check MIAMI-AD for AD Patterns"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Up
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+  library(tidyr)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+result_dir <- file.path(analysis_dir, "analysis-results")
+ref_dir <- file.path(analysis_dir, "code", "Reference_Files")
+result_dir <- file.path(analysis_dir, "analysis-results")
+```
+
+# Load Data
+
+## Load CpG Information
+
+```{r load_cpg}
+cpg_df <- read.csv(file = file.path(
+  analysis_dir,
+  "analysis-results",
+  "meta_analysis",
+  "meta_analysis_single_cpg_bacon.csv"
+  )
+) %>%
+  dplyr::select(
+    CpG = "probe",
+    chr = "seqnames",
+    pos = "start",
+    "GREAT_annotation",
+    estimate = "estimate_bacon",
+    stdErr = "standard_error_bacon",
+    pvalue = "pvalue_final_bacon",
+    Direction = "direction_bacon"
+  ) %>%
+  dplyr::mutate(Direction = ifelse(.data$estimate > 0, "+", "-"))
+
+match_df <- read.csv(file.path(ref_dir, "dmr_cpgs.csv")) %>%
+  dplyr::select(DMR = "DMR_aging", CpG = "cpg_aging") %>%
+  dplyr::left_join(cpg_df, by = "CpG")
+```
+
+## Load Miami-AD Data
+
+```{r load_miami}
+legend_df <- readxl::read_excel(
+  file.path(ref_dir, "Study_Legends.xlsx")
+) %>%
+  dplyr::select(
+    dataset = "Dataset",
+    "Description",
+    "Author",
+    "Year",
+    "PMID"
+  ) 
+
+dnam_df <- readxl::read_excel(
+  file.path(ref_dir, "miami_ad_both_cpg.xlsx"),
+  sheet = "Individual Datasets"
+) %>%
+  dplyr::rename(cohort = "sample_group") %>%
+  dplyr::filter(.data$pValue < 0.05) %>%
+  dplyr::left_join(legend_df, by = "dataset")
+
+dmr_df <- readxl::read_excel(
+  file.path(ref_dir, "miami_ad_both_dmr.xlsx"),
+  sheet = "Individual Datasets"
+) %>%
+  dplyr::rename(cohort = "sample_group") %>%
+  dplyr::filter(.data$pValue < 0.05) %>%
+  dplyr::left_join(legend_df, by = "dataset")
+```
+
+# Merge Results
+
+## Merge DMR Probes
+
+```{r merge_dmr}
+dmr_df <- match_df %>%
+  dplyr::inner_join(dmr_df, by = "CpG") %>%
+  dplyr::filter(.data$Direction == .data$direction) %>%
+  dplyr::arrange(.data$pValue)
+```
+
+## Merge DNAm Probes
+
+```{r merge_dnam}
+dnam_df <- cpg_df %>%
+  dplyr::inner_join(dnam_df, by = "CpG") %>%
+  dplyr::filter(.data$Direction == .data$direction) %>%
+  dplyr::arrange(.data$pValue)
+```
+
+# Save Reuslts
+
+```{r save}
+write.csv(
+  dmr_df,
+  file = file.path(
+    result_dir, 
+    "MIAMI-AD_validation",
+    "DMR_AD_External_Significance.csv"
+  ),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+write.csv(
+  dnam_df,
+  file = file.path(
+    result_dir, 
+    "MIAMI-AD_validation",
+    "DNAm_AD_External_Significance.csv"
+  ),
+  row.names = FALSE,
+  quote = TRUE
+)
+```
+
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>
+

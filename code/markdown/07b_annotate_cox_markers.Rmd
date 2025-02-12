@@ -1,0 +1,123 @@
+---
+title: "Add brain and blood analysis results to external cohort (ANDI) results"
+author:
+  - David Lukacsovich^[University of Miami]
+  - Lily Wang^[University of Miami]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    highlight: breezedark
+    theme: lumen
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+# Set Up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r library}
+suppressMessages({
+  library(dplyr)
+})
+
+base_dir <- "~/TBL Dropbox/David Lukacsovich"
+analysis_dir <- file.path(base_dir, "AD-Aging-brain-sample-analysis")
+cox_dir <- file.path(analysis_dir, "LWtest", "MRS")
+result_dir <- file.path(analysis_dir, "analysis-results", "comparison_aging_and_ad")
+```
+
+# Manage Data
+
+## Load Data
+
+```{r load}
+cpg_df <- read.csv(file.path(cox_dir, "cox_full_results_df_all_cpgs.csv")) %>%
+  as.data.frame()
+stat_df <- read.csv(file.path(result_dir, "Aging_and_AD_Significant_CpGs.csv")) %>%
+  as.data.frame()
+```
+
+## Merge Data
+
+```{r merge}
+cpg_df <- cpg_df %>%
+  dplyr::filter(.data$p_value < 0.05) %>%
+  dplyr::select(
+    cpg = "X",
+    Survival_Estimate = "estimate",
+    Survival_pValue = "p_value",
+    Survival_FDR = "fdr"
+  ) %>%
+  dplyr::mutate(cpg = stringr::str_sub(.data$cpg, 1, 10))
+aging_df <- stat_df %>%
+  dplyr::select(
+    "cpg",
+    Aging_Estimate = "estimate_aging",
+    Aging_StdErr = "std_err_aging", 
+    Aging_pValue = "pvalue_aging", 
+    Aging_FDR = "fdr_aging",
+    Aging_Direction = "direction_aging"
+  )
+ad_df <- stat_df %>%
+  dplyr::select(
+    "cpg",
+    AD_Estimate = "estimate_ad",
+    AD_StdErr = "std_err_ad", 
+    AD_pValue = "pvalue_ad", 
+    AD_FDR = "fdr_ad",
+    AD_Direction = "direction_ad"
+  )
+annot_df <- stat_df %>%
+  dplyr::select(
+    "cpg",
+    "chr",
+    "position",
+    "GREAT_annotation",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island",
+    "chromatin_state"
+  )
+
+label_df <- cpg_df %>%
+  dplyr::left_join(aging_df, by = "cpg") %>%
+  dplyr::left_join(ad_df, by = "cpg") %>%
+  dplyr::left_join(annot_df, by = "cpg")
+```
+
+## Display
+
+```{r display}
+label_df
+```
+
+## Save
+
+```{r save}
+write.csv(
+  label_df,
+  file = file.path(result_dir, "Survival_CpGs_Brain_Blood_Significance.csv"),
+  row.names = FALSE
+)
+```
+
+# Session Information
+
+<details>
+  <summary>**Session Info**</summary>
+```{r session}
+sessionInfo()
+```
+</details>
